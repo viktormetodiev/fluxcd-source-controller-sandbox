@@ -21,58 +21,72 @@ by our custom ones.
 #### Automated: the `sync-upstream` workflow
 
 The [`sync-upstream`](.github/workflows/sync-upstream.yaml) workflow runs on
-weekdays (and on demand from the Actions tab, optionally for a specific
-tag). When upstream publishes a new stable release (`vX.Y.Z`), it opens a PR
-named `Sync upstream vX.Y.Z` that merges the tag, runs
-`./scripts/rename-api-groups.sh` and `make tidy`. It uses
-[`scripts/sync-upstream.sh`](scripts/sync-upstream.sh), which you can also run
-locally to reproduce what the workflow did.
+weekdays, or on demand from the Actions tab (optionally for a given tag). When
+upstream publishes a new stable release (`vX.Y.Z`), it opens a PR named
+`Sync upstream vX.Y.Z` with two commits, so each can be reviewed on its own:
 
-The PR is always opened and **CI is the verdict**. If the merge had conflicts,
-the PR is a draft with the conflict markers committed, and the
+1. `Merge upstream tag vX.Y.Z`: upstream exactly as released.
+2. `chore: apply Qdrant adaptations after merging vX.Y.Z`: what the fork owns,
+   on top of it. Its message lists the fork-owned files put back or dropped, and
+   how many files `./scripts/rename-api-groups.sh` and `make tidy` changed. It
+   is skipped when there is nothing to change.
+
+[`scripts/sync-upstream.sh`](scripts/sync-upstream.sh) does the merge, and you
+can run it locally to reproduce what the workflow did.
+
+**Merge these PRs with a merge commit, not squash or rebase.** The upstream tag
+has to stay an ancestor of `main`, otherwise the next sync re-applies history
+that is already in.
+
+**The fork owns everything under `.github/`** (workflows, CODEOWNERS, Dependabot
+config), as listed in [`scripts/fork-owned.txt`](scripts/fork-owned.txt).
+Upstream's CI relies on secrets and services that only Flux has, and workflows
+run with this repository's credentials, so nothing from upstream's `.github/` is
+activated here. When upstream changes something there, the merge commit takes
+upstream's version and the adaptations commit puts the fork's back, so nothing
+conflicts and that commit shows what the fork did not take. Upstream changed
+`.github/` in roughly 1 of 4 recent releases, mostly minors. To take an upstream
+CI change, copy it by hand into the fork's own file.
+
+**CI is the verdict.** The PR is always opened. With merge conflicts it is a
+draft: the markers are committed together with `.sync-upstream-conflicts`, a
+list of the conflicting files (some conflicts, like a file deleted upstream and
+modified here, leave no markers). The
 [`conflict-markers`](.github/workflows/conflict-markers.yaml) check fails until
-they are resolved. If it merged cleanly but does not build or pass the tests, CI is
-red and someone needs to fix it on the PR branch. The workflow never merges or
-tags anything. Closing a PR without merging tells it to leave that release
-alone.
-
-The workflow authenticates with the `BOT_GITHUB_TOKEN` secret, not with
-`GITHUB_TOKEN`: pushes and PRs made with `GITHUB_TOKEN` do not trigger CI. The
-token must be able to push branches and open PRs, and also to push changes to
-files under `.github/workflows/`, because upstream releases regularly modify
-them (for a classic PAT that means the `workflow` scope, for a fine-grained
-token or a GitHub App the "Workflows" write permission).
-
-To try it without side effects, run the workflow from the Actions tab with
-`dry_run` enabled: it does everything except pushing the branch and opening
-the PR, and prints the result (commits, diff stat, build outcome and the PR
-body) to the job summary. PRs that change the workflow or the scripts it uses
-trigger a dry run automatically, without access to `BOT_GITHUB_TOKEN`.
-
+the conflicts are resolved and that file is deleted. If it merged cleanly but
+does not build or pass the tests, CI is red and someone fixes it on the PR
+branch. The workflow never merges or tags
+anything, and closing a PR without merging tells it to leave that release alone.
 Compatibility with the cloud-agent is not checked here: the agent's own CI is
 the gate once its `replace` lines are bumped to the new fork release.
 
+**Token.** The workflow uses the `BOT_GITHUB_TOKEN` secret, not `GITHUB_TOKEN`:
+pushes and PRs made with `GITHUB_TOKEN` do not trigger CI. It must be able to
+push branches, open PRs and push changes under `.github/workflows/` (for a
+classic PAT the `workflow` scope, for a fine-grained token or a GitHub App the
+"Workflows" write permission). Scheduled runs skip quietly, with a notice, until
+the secret exists; manual runs fail with a clear error. Only the last step, the
+push, receives the token: the checkout does not persist credentials, because
+`make tidy` runs upstream's Makefile.
+
+**Dry run.** Run the workflow from the Actions tab with `dry_run` enabled to do
+everything except pushing the branch and opening the PR. Every run, dry or not,
+shows the commits, the build outcome and the PR body in the job summary.
+
 #### Manual
 
-Use this when the workflow cannot help, e.g. to sync something that is not a
-release tag.
+To sync by hand, for example when the workflow cannot run, use the same script on
+an up-to-date `main` (it needs `go` and `make` for the tidy step):
 
-- Configure and fetch upstream/main.
-- Create your development branch from origin/main and merge upstream/main into
-  it. You can run the merge with `-X theirs` option.
-- Solve the git conflicts if any.
-- As there might be new files or content added in upstream, we might need to
-  rename groups again. You can do that executing
-  `./scripts/rename-api-groups.sh`.
-- Run `go mod tidy` to clean up the dependencies and execute the tests of the project with `make test`.
-- Ideally, they are passing. Otherwise, you need to work on fixing any possible
-  issue.
-- Push your development branch. After that, you would need to test it using it
-  in the cloud-agent to confirm everything works as expected.
-- Once you confirm it works fine, create a PR for review.
-- **Note for the reviewer:** The merge commit from upstream/main doesn't make
-  sense to review it. Focus on the commits with the changes relevant for the
-  project.
+```sh
+scripts/sync-upstream.sh merge vX.Y.Z
+git push origin sync/upstream-vX.Y.Z
+```
+
+Then open a PR against `main` and merge it with a merge commit. If the merge has
+conflicts, resolve them on that branch and delete `.sync-upstream-conflicts`.
+Do not use `-X theirs`: it would silently prefer upstream's side of every
+conflict, including the fork's changes.
 
 ---
 

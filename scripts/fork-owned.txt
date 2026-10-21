@@ -1,0 +1,12 @@
+# Paths that this fork owns, even though upstream has files there too. One git
+# pathspec per line (a file or a directory).
+#
+# scripts/sync-upstream.sh merges upstream's version of whatever it changed under
+# these paths in the merge commit, and puts the fork's version back in the
+# "Apply Qdrant adaptations" commit that follows. That commit is the audit trail
+# of what the fork dropped from upstream on each sync.
+#
+# The fork owns all of .github/: upstream's CI uses secrets and services that
+# only Flux has (FOSSA, Docker Hub, its bot token), and workflows run with this
+# repository's credentials, so nothing from upstream gets there unreviewed.
+.github/

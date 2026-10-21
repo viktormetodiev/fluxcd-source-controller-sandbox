@@ -43,6 +43,12 @@ files under `.github/workflows/`, because upstream releases regularly modify
 them (for a classic PAT that means the `workflow` scope, for a fine-grained
 token or a GitHub App the "Workflows" write permission).
 
+To try it without side effects, run the workflow from the Actions tab with
+`dry_run` enabled: it does everything except pushing the branch and opening
+the PR, and prints the result (commits, diff stat, build outcome and the PR
+body) to the job summary. PRs that change the workflow or the scripts it uses
+trigger a dry run automatically, without access to `BOT_GITHUB_TOKEN`.
+
 Compatibility with the cloud-agent is not checked here: the agent's own CI is
 the gate once its `replace` lines are bumped to the new fork release.
 

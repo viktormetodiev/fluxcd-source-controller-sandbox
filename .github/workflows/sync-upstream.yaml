@@ -41,7 +41,7 @@ jobs:
   # Scheduled runs skip quietly until the BOT_GITHUB_TOKEN secret exists, instead
   # of failing every weekday. Manual runs fail with a clear error.
   probe:
-    if: github.repository_owner == 'qdrant'
+    if: github.repository_owner == 'viktormetodiev'
     runs-on: ubuntu-latest
     outputs:
       token_available: ${{ steps.probe.outputs.available }}
@@ -100,9 +100,9 @@ jobs:
           GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
           BRANCH: ${{ steps.target.outputs.branch }}
         run: |
-          # --state all: a pull request closed without merging is a decision not
+          # --state open: a pull request closed without merging is a decision not
           # to take this release, so do not reopen it every morning.
-          prs=$(gh pr list --state all --head "$BRANCH" --json number --jq 'length')
+          prs=$(gh pr list --state open --head "$BRANCH" --json number --jq 'length')
           if [ "$prs" != "0" ] || git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
             echo "Branch or pull request for $BRANCH already exists, nothing to do."
             echo "skip=true" >> "$GITHUB_OUTPUT"

@@ -41,7 +41,7 @@ jobs:
   # skip quietly instead of failing every week, manual runs fail with a clear
   # error, and dry runs go ahead (they do not need it).
   gate:
-    if: github.repository_owner == 'qdrant'
+    if: github.repository_owner == 'viktormetodiev'
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.gate.outputs.run }}
@@ -107,9 +107,9 @@ jobs:
           # Dry runs always go ahead: they exist to exercise the merge.
           skip=false
           if [ "$DRY_RUN" != true ]; then
-            # --state all: a pull request closed without merging is a decision
+            # --state open: a pull request closed without merging is a decision
             # not to take this release, so do not reopen it every week.
-            prs=$(gh pr list --state all --head "$BRANCH" --json number --jq length)
+            prs=$(gh pr list --state open --head "$BRANCH" --json number --jq length)
             if [ "$prs" != 0 ] || git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
               echo "Branch or pull request for $BRANCH already exists, nothing to do."
               skip=true

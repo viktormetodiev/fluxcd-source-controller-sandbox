@@ -10,3 +10,4 @@
 # only Flux has (FOSSA, Docker Hub, its bot token), and workflows run with this
 # repository's credentials, so nothing from upstream gets there unreviewed.
 .github/
+internal/controller/helmrepository_controller_test.go

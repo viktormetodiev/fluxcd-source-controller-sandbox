@@ -2,6 +2,68 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.9.6
+
+**Release date:** 2026-10-01
+
+This patch release normalizes Azure Blob listing ETags so that the listing digest
+stays consistent with the stored artifact revision and unchanged containers are no
+longer re-downloaded on every reconcile, and evicts stale Helm repository index
+entries from the cache so that repositories with frequently changing indexes no
+longer fail with "Cache is full".
+
+Fixes:
+- Normalize Azure listing ETags
+  [#2171](https://github.com/fluxcd/source-controller/pull/2171)
+- Evict stale Helm index entries from cache
+  [#2152](https://github.com/fluxcd/source-controller/pull/2152)
+
+Improvements:
+- Replace MinIO server with in-process S3 mock in tests
+  [#2153](https://github.com/fluxcd/source-controller/pull/2153)
+- Correct the shallow clone claim for commit plus branch in the GitRepository docs
+  [#2147](https://github.com/fluxcd/source-controller/pull/2147)
+
+## 1.9.5
+
+**Release date:** 2026-08-31
+
+This patch release upgrades Helm to v4.2.4 to stay in sync with helm-controller
+1.6, which moved back from the Flux fork of Helm to upstream. It also updates
+the fluxcd/pkg dependencies, which bring Kubernetes to 1.36.4.
+
+Improvements:
+- Upgrade helm to 4.2.4 (sync with HC 1.6)
+  [#2140](https://github.com/fluxcd/source-controller/pull/2140)
+- Update fluxcd/pkg dependencies
+  [#2141](https://github.com/fluxcd/source-controller/pull/2141)
+  [#2142](https://github.com/fluxcd/source-controller/pull/2142)
+
+## 1.9.4
+
+**Release date:** 2026-08-07
+
+This patch release aligns Helm repository index loading with upstream Helm v4 by
+skipping empty entries, improves the error handling in the `Bucket` reconciler
+for optional fields in Azure responses, resolves OCI Helm charts by digest so
+that verification and download operate on the same content, and limits GCS
+static authentication to secrets holding service account keys. It also updates
+the fluxcd/pkg dependencies, which align the ECR host detection with upstream.
+
+Fixes:
+- Align index loading with upstream Helm v4
+  [#2121](https://github.com/fluxcd/source-controller/pull/2121)
+- Improve error handling in Bucket reconciliation
+  [#2123](https://github.com/fluxcd/source-controller/pull/2123)
+- Pin OCI chart verification by digest
+  [#2125](https://github.com/fluxcd/source-controller/pull/2125)
+- Limit GCS static authentication to service account keys
+  [#2130](https://github.com/fluxcd/source-controller/pull/2130)
+
+Improvements:
+- Update fluxcd/pkg dependencies
+  [#2131](https://github.com/fluxcd/source-controller/pull/2131)
+
 ## 1.9.3
 
 **Release date:** 2026-07-13

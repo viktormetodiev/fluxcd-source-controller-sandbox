@@ -1,0 +1,33 @@
+name: scripts-test
+
+# Runs the offline tests of the fork's own scripts (scripts/*_test.sh).
+
+on:
+  pull_request:
+    paths:
+      - scripts/**
+      - .github/workflows/scripts-test.yaml
+  push:
+    branches: [ main ]
+    paths:
+      - scripts/**
+      - .github/workflows/scripts-test.yaml
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: sync-upstream.sh
+        run: scripts/sync-upstream_test.sh
+
+      - name: rename-api-groups.sh
+        run: scripts/rename-api-groups_test.sh

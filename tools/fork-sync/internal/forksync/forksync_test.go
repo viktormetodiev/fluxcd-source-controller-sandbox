@@ -30,7 +30,7 @@ type fixture struct {
 // renameScript stands in for the fork's rename-api-groups.sh.
 const renameScript = `#!/usr/bin/env bash
 set -e
-for f in *.yaml; do sed -i.bak "s/source.toolkit.fluxcd.io/cd.qdrant.io/g" "$f"; rm -f "$f.bak"; done
+for f in *.yaml; do sed -i.bak "s/cd.qdrant.io/cd.qdrant.io/g" "$f"; rm -f "$f.bak"; done
 `
 
 func newFixture(t *testing.T, upstreamChanges, forkChanges string) *fixture {
@@ -43,7 +43,7 @@ func newFixture(t *testing.T, upstreamChanges, forkChanges string) *fixture {
 
 	sh(t, dir, `git init -q -b main up && cd up && mkdir -p .github/workflows
 printf 'upstream scan v1\nfossa\n' > .github/workflows/scan.yaml
-{ echo 'group: source.toolkit.fluxcd.io'; for i in 1 2 3 4 5 6 7 8; do echo "filler $i"; done; echo 'tail: original'; } > crd.yaml
+{ echo 'group: cd.qdrant.io'; for i in 1 2 3 4 5 6 7 8; do echo "filler $i"; done; echo 'tail: original'; } > crd.yaml
 echo other > other.txt
 git add -A && git commit -qm v1.0.0 && git tag v1.0.0`)
 	sh(t, upstream, upstreamChanges)
@@ -66,7 +66,7 @@ adaptations:
     allowFailure: true
 `)
 	sh(t, fork, `git checkout -q -B main v1.0.0
-sed -i.bak 's/source.toolkit.fluxcd.io/cd.qdrant.io/' crd.yaml && rm crd.yaml.bak
+sed -i.bak 's/cd.qdrant.io/cd.qdrant.io/' crd.yaml && rm crd.yaml.bak
 printf 'fork codeql-only scan\n' > .github/workflows/scan.yaml
 printf 'fork ci\n' > .github/workflows/ours.yaml`)
 	sh(t, fork, forkChanges)
@@ -140,14 +140,14 @@ func TestFindTarget(t *testing.T) {
 func TestMerge(t *testing.T) {
 	t.Run("upstream edits an owned file, adds a file with the old group name, edits another file", func(t *testing.T) {
 		f := newFixture(t, `printf 'upstream scan v2\nfossa\n' > .github/workflows/scan.yaml
-echo "new: source.toolkit.fluxcd.io" > new.yaml
+echo "new: cd.qdrant.io" > new.yaml
 echo "other v2" > other.txt`, ``)
 		res := f.merge()
 
 		assert.Equal(t, StatusMerged, res.Status)
 		assert.Equal(t, []string{"Merge upstream tag v1.0.1", "chore: apply Qdrant adaptations after merging v1.0.1"}, f.subjects())
 		assert.Contains(t, f.git("show", "HEAD~1:.github/workflows/scan.yaml"), "upstream scan v2", "the merge commit has upstream's version")
-		assert.Contains(t, f.git("show", "HEAD~1:new.yaml"), "source.toolkit.fluxcd.io", "the merge commit has upstream's changes only")
+		assert.Contains(t, f.git("show", "HEAD~1:new.yaml"), "cd.qdrant.io", "the merge commit has upstream's changes only")
 		assert.Contains(t, f.read(".github/workflows/scan.yaml"), "fork codeql-only")
 		assert.Contains(t, f.read("new.yaml"), "cd.qdrant.io")
 		assert.Contains(t, f.read("other.txt"), "other v2")
@@ -253,7 +253,7 @@ func TestMergeConflicts(t *testing.T) {
 func TestMergeAdaptationFailures(t *testing.T) {
 	t.Run("an adaptation allowed to fail drops its changes, the rest is kept", func(t *testing.T) {
 		// Like the Makefile's "rm -f go.sum" before go mod tidy fails.
-		f := newFixture(t, `echo "new: source.toolkit.fluxcd.io" > new.yaml`,
+		f := newFixture(t, `echo "new: cd.qdrant.io" > new.yaml`,
 			`printf 'tidy:\n\trm -f other.txt\n\ttouch leftover.txt\n\texit 1\n' > Makefile`)
 		res := f.merge()
 		assert.Equal(t, StatusMerged, res.Status, "the pull request still gets opened")

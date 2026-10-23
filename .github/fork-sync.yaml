@@ -12,6 +12,7 @@ baseBranch: main
 ownedPaths:
   - .github/
   - tools/
+  - internal/controller/helmrepository_controller_test.go
 
 # Renames Flux's API groups to Qdrant's, so that the CRDs do not collide with a
 # Flux install in the same cluster. Runs after the merge, before the

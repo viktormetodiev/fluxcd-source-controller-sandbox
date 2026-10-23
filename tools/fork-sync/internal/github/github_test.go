@@ -31,7 +31,7 @@ func TestPullRequestExists(t *testing.T) {
 			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 				assert.Equal(t, http.MethodGet, r.Method)
 				assert.Equal(t, "/repos/qdrant/fork/pulls", r.URL.Path)
-				assert.Equal(t, "all", r.URL.Query().Get("state"))
+				assert.Equal(t, "open", r.URL.Query().Get("state"))
 				assert.Equal(t, "qdrant:sync/upstream-v1.0.1", r.URL.Query().Get("head"))
 				assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
 				_, _ = w.Write([]byte(tc.response))

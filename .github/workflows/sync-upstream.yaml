@@ -1,10 +1,11 @@
 name: sync-upstream
 
-# Opens a pull request that merges the latest release of this fork's upstream
-# (set in scripts/sync-upstream.sh) into it. The pull request is always opened: if
-# the merge has conflicts or the result does not build, CI on it fails and someone
-# has to take care of it. See "Maintaining the fork up to date" in the README.
-# This file is the same in every Qdrant fork that uses it.
+# Opens a pull request that merges the latest release of this fork's upstream into
+# it, with tools/fork-sync and the settings in .github/fork-sync.yaml. The pull
+# request is always opened: if the merge has conflicts or the result does not
+# build, CI on it fails and someone has to take care of it. See "Maintaining the
+# fork up to date" in the README. This file is the same in every Qdrant fork that
+# uses it.
 #
 # With dry_run, everything happens except pushing the branch and opening the pull
 # request. Every run shows the result in the job summary.
@@ -30,11 +31,6 @@ permissions: {}
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
-
-env:
-  # This repository is a fork: without an explicit repository, gh targets the
-  # parent project, and the sync pull requests would open there.
-  GH_REPO: ${{ github.repository }}
 
 jobs:
   # Decides whether to run. Without the BOT_GITHUB_TOKEN secret, scheduled runs
@@ -67,145 +63,56 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read # for the existence check below, which only reads public data
+      pull-requests: read # for target --check-existing, which only reads public data
     env:
       GIT_AUTHOR_NAME: github-actions[bot]
       GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
       GIT_COMMITTER_NAME: github-actions[bot]
       GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
     steps:
-      # The credentials are not persisted: make tidy runs upstream's Makefile, and
-      # nothing that runs before the push step can read the token.
+      # The credentials are not persisted: the adaptations run upstream's code
+      # (make tidy runs its Makefile), and nothing before the publish step can
+      # read the token.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # No Go cache: this job runs upstream's unreviewed code (make tidy) on the
-      # default branch, and a cache it saves would be restored by other workflows.
+      # No Go cache: this job runs upstream's unreviewed code on the default
+      # branch, and a cache it saves would be restored by other workflows.
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: tools/fork-sync/go.mod
           cache: false
+
+      # Built before the merge, from the fork's own code.
+      - name: Build fork-sync
+        run: go -C tools/fork-sync build -o "$RUNNER_TEMP/fork-sync" .
 
       - name: Find the upstream release to sync
         id: target
         env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: scripts/sync-upstream.sh target "$INPUT_TAG"
-
-      - name: Skip if the sync branch or a pull request already exists
-        id: existing
-        if: steps.target.outputs.status == 'needs-sync'
-        env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.target.outputs.branch }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
+          TAG: ${{ inputs.tag }}
           # Dry runs always go ahead: they exist to exercise the merge.
-          skip=false
-          if [ "$DRY_RUN" != true ]; then
-            # --state all: a pull request closed without merging is a decision
-            # not to take this release, so do not reopen it every week.
-            prs=$(gh pr list --state all --head "$BRANCH" --json number --jq length)
-            if [ "$prs" != 0 ] || git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
-              echo "Branch or pull request for $BRANCH already exists, nothing to do."
-              skip=true
-            fi
-          fi
-          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          CHECK_EXISTING: ${{ inputs.dry_run != true }}
+        run: '"$RUNNER_TEMP/fork-sync" target --tag "$TAG" --check-existing="$CHECK_EXISTING" >> "$GITHUB_OUTPUT"'
 
       - name: Merge the upstream release
         id: merge
-        if: steps.existing.outputs.skip == 'false'
+        if: steps.target.outputs.status == 'needs-sync'
         env:
           TAG: ${{ steps.target.outputs.tag }}
-          # setup-go pins the Go of the fork's go.mod; a release can need a newer one.
+          # setup-go pins the Go of tools/fork-sync; a release can need a newer one.
           GOTOOLCHAIN: auto
-        run: scripts/sync-upstream.sh merge "$TAG"
+        run: '"$RUNNER_TEMP/fork-sync" merge "$TAG" --body-file "$RUNNER_TEMP/pr-body.md" --summary-file "$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"'
 
-      - name: Write the pull request body
-        if: steps.merge.outcome == 'success'
-        env:
-          TAG: ${{ steps.merge.outputs.tag }}
-          UPSTREAM: ${{ steps.merge.outputs.upstream }}
-          CONFLICTS_FILE: ${{ steps.merge.outputs.conflicts_file }}
-          TIDY: ${{ steps.merge.outputs.tidy }}
-        run: |
-          {
-            if [ "$TIDY" = failed ]; then
-              echo "> **\`make tidy\` failed**, so the modules are not tidied. See the workflow run for the error."
-              echo
-            fi
-            if [ -n "$CONFLICTS_FILE" ]; then
-              echo "> **Merge conflicts.** The merge is committed as it is, with a list of the conflicting files. CI fails until they are resolved and \`.sync-upstream-conflicts\` is deleted. Conflicting files:"
-              echo
-              sed 's/^/> - `/; s/$/`/' "$CONFLICTS_FILE"
-              echo
-            fi
-            sed "s|@TAG@|$TAG|g; s|@UPSTREAM@|$UPSTREAM|g" .github/sync-upstream-pr-body.md
-          } > pr-body.md
-
-      # Informational: a build failure is a property of the upstream release, not
-      # of this automation, so it must not fail the run. CI on the pull request
-      # is the verdict.
-      - name: Build the result
-        id: build
-        if: steps.merge.outputs.status == 'merged'
-        continue-on-error: true
-        env:
-          GOTOOLCHAIN: auto
-        run: go build ./...
-
-      - name: Show the result
-        if: steps.merge.outcome == 'success'
-        env:
-          TAG: ${{ steps.merge.outputs.tag }}
-          BASE: ${{ steps.merge.outputs.base }}
-          MERGE_STATUS: ${{ steps.merge.outputs.status }}
-          BUILD_OUTCOME: ${{ steps.build.outcome }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          {
-            echo "## Sync upstream ${TAG}"
-            echo
-            echo "Merge status: **${MERGE_STATUS}**. Build after the merge: **${BUILD_OUTCOME}**."
-            if [ "$DRY_RUN" = true ]; then
-              echo "Dry run: nothing was pushed and no pull request was opened."
-            fi
-            echo
-            echo '```'
-            git log --first-parent --oneline "${BASE}..HEAD"
-            echo '```'
-            echo
-            echo "### Pull request body"
-            echo
-            cat pr-body.md
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Push branch and open pull request
+      - name: Push the branch and open the pull request
         if: inputs.dry_run != true && steps.merge.outcome == 'success'
         env:
+          # The only step that gets the token.
           GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
-          TAG: ${{ steps.merge.outputs.tag }}
           BRANCH: ${{ steps.merge.outputs.branch }}
-          CONFLICTS_FILE: ${{ steps.merge.outputs.conflicts_file }}
-        run: |
-          # The only step that gets the token, passed to this one git command.
-          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-          echo "::add-mask::$auth"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" push origin "$BRANCH"
-
-          draft=()
-          if [ -n "$CONFLICTS_FILE" ]; then
-            draft=(--draft)
-          fi
-          gh pr create \
-            --repo "$GH_REPO" \
-            --base main \
-            --head "$BRANCH" \
-            --title "Sync upstream ${TAG}" \
-            --body-file pr-body.md \
-            "${draft[@]}"
+        run: '"$RUNNER_TEMP/fork-sync" publish --branch "$BRANCH" --body-file "$RUNNER_TEMP/pr-body.md"'

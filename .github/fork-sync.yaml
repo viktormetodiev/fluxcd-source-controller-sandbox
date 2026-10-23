@@ -1,0 +1,29 @@
+# How this fork follows the releases of its upstream. Read by tools/fork-sync,
+# which the sync-upstream workflow runs. See "Maintaining the fork up to date" in
+# the README.
+
+upstream: https://github.com/fluxcd/source-controller.git
+baseBranch: main
+
+# Paths the fork owns: upstream's changes there are not taken. The fork owns all
+# of .github/: upstream's CI needs secrets only Flux has, and workflows run with
+# this repository's credentials.
+ownedPaths:
+  - .github/
+
+# Run in order after the merge. What they change goes into the adaptations commit.
+adaptations:
+  - name: rename API groups
+    run: [./scripts/rename-api-groups.sh]
+  - name: make tidy
+    run: [make, tidy]
+    # A release can need a newer Go than the fork's tooling: the pull request
+    # still opens, with a note.
+    allowFailure: true
+
+# Run after the adaptations. Reported in the pull request, never committed.
+checks:
+  - name: build
+    run: [go, build, ./...]
+
+prBodyTemplate: .github/sync-upstream-pr-body.md

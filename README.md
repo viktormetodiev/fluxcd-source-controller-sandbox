@@ -27,8 +27,10 @@ pushing). The PR, `Sync upstream vX.Y.Z`, has up to two commits:
 2. `chore: apply Qdrant adaptations ...`, only when needed: what the fork owns,
    put back or regenerated. Its message lists the files.
 
-[`scripts/sync-upstream.sh`](scripts/sync-upstream.sh) does the merge and can be
-run locally.
+The workflow runs [`tools/fork-sync`](tools/fork-sync), a small Go tool. What the
+fork owns, the commands that adapt upstream's code (the API group rename,
+`make tidy`) and the checks after the merge are set in
+[`.github/fork-sync.yaml`](.github/fork-sync.yaml).
 
 **Reviewing a sync PR**
 
@@ -37,31 +39,32 @@ run locally.
   conflicting files (`.sync-upstream-conflicts`) committed. The
   [`conflict-markers`](.github/workflows/conflict-markers.yaml) check fails until
   the conflicts are resolved and that list is deleted.
-- If `make tidy` fails (say, the release needs a newer Go) the PR still opens,
-  with a note.
+- If `make tidy` or the build fails (say, the release needs a newer Go) the PR
+  still opens, with a note.
 - Merge with a merge commit, never squash or rebase: the upstream tag has to stay
   an ancestor of `main`.
 - The workflow never merges or tags. Closing a PR without merging tells it to
   skip that release. The agent's own CI is what checks compatibility with it.
 
-**The fork owns `.github/`** ([`scripts/fork-owned.txt`](scripts/fork-owned.txt)).
-Upstream's CI needs secrets only Flux has and would run with this repository's
-credentials, so it is never activated: when upstream changes something there, the
-adaptations commit puts the fork's version back (on conflicted syncs too). To take
-an upstream CI change, copy it by hand.
+**The fork owns `.github/`.** Upstream's CI needs secrets only Flux has and would
+run with this repository's credentials, so it is never activated: when upstream
+changes something there, the adaptations commit puts the fork's version back (on
+conflicted syncs too). To take an upstream CI change, copy it by hand.
 
 **Token.** The workflow needs a `BOT_GITHUB_TOKEN` secret (not `GITHUB_TOKEN`,
 whose PRs do not trigger CI) that can push branches, open PRs and change files
 under `.github/workflows/`. Without it, scheduled runs skip with a notice and
-manual runs fail with a clear error. Only the push step receives it.
+manual runs fail with a clear error. Only the publish step receives it.
 
-**Tests.** `scripts/*_test.sh` are offline (git, make and bash) and run in CI as
-`scripts-test`.
+**Tests.** `go -C tools/fork-sync test ./...` and
+`scripts/rename-api-groups_test.sh`, run in CI as `fork-tools-test`.
 
 #### Manual sync
 
+From an up-to-date `main` (needs `go` and `make`):
+
 ```sh
-scripts/sync-upstream.sh merge vX.Y.Z    # on an up-to-date main; needs go and make
+go -C tools/fork-sync run . --repo ../.. merge vX.Y.Z
 git push origin sync/upstream-vX.Y.Z
 ```
 

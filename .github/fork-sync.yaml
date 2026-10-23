@@ -10,6 +10,7 @@ baseBranch: main
 # this repository's credentials.
 ownedPaths:
   - .github/
+  - internal/controller/helmrepository_controller_test.go
 
 # Run in order after the merge. What they change goes into the adaptations commit.
 adaptations:

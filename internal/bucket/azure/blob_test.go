@@ -28,6 +28,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -540,15 +542,195 @@ func TestBlobClient_VisitObjects_Prefix(t *testing.T) {
 				withoutRetries())
 			g.Expect(err).ToNot(HaveOccurred())
 
-			var visited []string
+			visited := map[string]string{}
 			err = client.VisitObjects(t.Context(), bucketName, tt.prefix, func(path, etag string) error {
-				visited = append(visited, path)
+				visited[path] = etag
 				return nil
 			})
 			g.Expect(err).ToNot(HaveOccurred())
-			g.Expect(visited).To(Equal([]string{tt.prefix + "file.txt"}))
+			g.Expect(visited).To(Equal(map[string]string{
+				tt.prefix + "file.txt": `"0x8D9B2A2A2A2A2A2"`,
+			}))
 		})
 	}
+}
+
+// TestBlobClient_VisitObjects_EtagMatchesFGetObject verifies that the ETag
+// returned when listing a blob equals the ETag returned when downloading the
+// same blob. Azure returns the ETag unquoted in the List Blobs XML body and
+// quoted in the Get Blob response header, while the Bucket reconciler compares
+// the two values to decide whether the container changed. A mismatch makes the
+// reconciler re-download the whole container on every reconcile.
+func TestBlobClient_VisitObjects_EtagMatchesFGetObject(t *testing.T) {
+	g := NewWithT(t)
+
+	bucketName := "test-bucket"
+	objectName := "file.txt"
+	const rawEtag = "0x8D9B2A2A2A2A2A2"
+
+	bucketListener, bucketAddr, _ := testlistener.New(t)
+	bucketEndpoint := fmt.Sprintf("http://%s", bucketAddr)
+	bucketHandler := http.NewServeMux()
+	// List Blobs returns the ETag unquoted in the XML body.
+	bucketHandler.HandleFunc(fmt.Sprintf("GET /%s", bucketName), func(w http.ResponseWriter, r *http.Request) {
+		resp := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+<EnumerationResults ContainerName="%s/%s">
+<Blobs>
+  <Blob>
+    <Name>%s</Name>
+    <Properties>
+      <Etag>%s</Etag>
+    </Properties>
+  </Blob>
+</Blobs>
+<NextMarker />
+</EnumerationResults>`, bucketEndpoint, bucketName, objectName, rawEtag)
+		_, err := w.Write([]byte(resp))
+		g.Expect(err).ToNot(HaveOccurred())
+	})
+	// Get Blob returns the ETag quoted in the response header.
+	bucketHandler.HandleFunc(fmt.Sprintf("GET /%s/%s", bucketName, objectName), func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", fmt.Sprintf("%q", rawEtag))
+		_, err := w.Write([]byte("file contents"))
+		g.Expect(err).ToNot(HaveOccurred())
+	})
+	bucketServer := &http.Server{
+		Addr:    bucketAddr,
+		Handler: bucketHandler,
+	}
+	go bucketServer.Serve(bucketListener)
+	defer bucketServer.Shutdown(context.Background())
+
+	bucket := &sourcev1.Bucket{
+		Spec: sourcev1.BucketSpec{
+			Endpoint: bucketEndpoint,
+		},
+	}
+	client, err := NewClient(t.Context(),
+		bucket,
+		withoutCredentials(),
+		withoutRetries())
+	g.Expect(err).ToNot(HaveOccurred())
+
+	var listEtag string
+	err = client.VisitObjects(t.Context(), bucketName, "", func(path, etag string) error {
+		if path == objectName {
+			listEtag = etag
+		}
+		return nil
+	})
+	g.Expect(err).ToNot(HaveOccurred())
+
+	localPath := filepath.Join(t.TempDir(), objectName)
+	downloadEtag, err := client.FGetObject(t.Context(), bucketName, objectName, localPath)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	g.Expect(listEtag).To(Equal(`"` + rawEtag + `"`))
+	g.Expect(downloadEtag).To(Equal(`"` + rawEtag + `"`))
+	g.Expect(listEtag).To(Equal(downloadEtag))
+}
+
+func TestBlobClient_FGetObject_MissingEtag(t *testing.T) {
+	g := NewWithT(t)
+
+	bucketName := "test-bucket"
+	objectName := "file.txt"
+
+	// start mock bucket server which omits the ETag response header
+	bucketListener, bucketAddr, _ := testlistener.New(t)
+	bucketEndpoint := fmt.Sprintf("http://%s", bucketAddr)
+	bucketHandler := http.NewServeMux()
+	bucketHandler.HandleFunc(fmt.Sprintf("GET /%s/%s", bucketName, objectName), func(w http.ResponseWriter, r *http.Request) {
+		_, err := w.Write([]byte("file contents"))
+		g.Expect(err).ToNot(HaveOccurred())
+	})
+	bucketServer := &http.Server{
+		Addr:    bucketAddr,
+		Handler: bucketHandler,
+	}
+	go bucketServer.Serve(bucketListener)
+	defer bucketServer.Shutdown(context.Background())
+
+	bucket := &sourcev1.Bucket{
+		Spec: sourcev1.BucketSpec{
+			Endpoint: bucketEndpoint,
+		},
+	}
+	client, err := NewClient(t.Context(),
+		bucket,
+		withoutCredentials(),
+		withoutRetries())
+	g.Expect(err).ToNot(HaveOccurred())
+
+	localPath := filepath.Join(t.TempDir(), objectName)
+	etag, err := client.FGetObject(t.Context(), bucketName, objectName, localPath)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(etag).To(BeEmpty())
+	g.Expect(os.ReadFile(localPath)).To(BeEquivalentTo("file contents"))
+}
+
+func TestBlobClient_VisitObjects_MissingFields(t *testing.T) {
+	g := NewWithT(t)
+
+	bucketName := "test-bucket"
+
+	// start mock bucket server whose listing contains entries with
+	// missing optional fields
+	bucketListener, bucketAddr, _ := testlistener.New(t)
+	bucketEndpoint := fmt.Sprintf("http://%s", bucketAddr)
+	bucketHandler := http.NewServeMux()
+	bucketHandler.HandleFunc(fmt.Sprintf("GET /%s", bucketName), func(w http.ResponseWriter, r *http.Request) {
+		resp := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+<EnumerationResults ContainerName="%s/%s">
+<Blobs>
+  <Blob>
+    <Name>no-properties.txt</Name>
+  </Blob>
+  <Blob>
+    <Name>no-etag.txt</Name>
+    <Properties />
+  </Blob>
+  <Blob>
+    <Properties>
+      <Etag>0x8D9B2A2A2A2A2A2</Etag>
+    </Properties>
+  </Blob>
+</Blobs>
+<NextMarker />
+</EnumerationResults>`, bucketEndpoint, bucketName)
+		_, err := w.Write([]byte(resp))
+		g.Expect(err).ToNot(HaveOccurred())
+	})
+	bucketServer := &http.Server{
+		Addr:    bucketAddr,
+		Handler: bucketHandler,
+	}
+	go bucketServer.Serve(bucketListener)
+	defer bucketServer.Shutdown(context.Background())
+
+	bucket := &sourcev1.Bucket{
+		Spec: sourcev1.BucketSpec{
+			Endpoint: bucketEndpoint,
+		},
+	}
+	client, err := NewClient(t.Context(),
+		bucket,
+		withoutCredentials(),
+		withoutRetries())
+	g.Expect(err).ToNot(HaveOccurred())
+
+	visited := map[string]string{}
+	err = client.VisitObjects(t.Context(), bucketName, "", func(path, etag string) error {
+		visited[path] = etag
+		return nil
+	})
+	g.Expect(err).ToNot(HaveOccurred())
+	// The nameless entry is skipped, entries without an etag are
+	// visited with an empty etag.
+	g.Expect(visited).To(Equal(map[string]string{
+		"no-properties.txt": "",
+		"no-etag.txt":       "",
+	}))
 }
 
 func Test_chainCredentialWithSecret(t *testing.T) {

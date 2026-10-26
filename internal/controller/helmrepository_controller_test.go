@@ -35,10 +35,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	kstatus "github.com/fluxcd/cli-utils/pkg/kstatus/status"
@@ -48,6 +48,7 @@ import (
 	"github.com/fluxcd/pkg/helmtestserver"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	conditionscheck "github.com/fluxcd/pkg/runtime/conditions/check"
+	"github.com/fluxcd/pkg/runtime/events"
 	"github.com/fluxcd/pkg/runtime/patch"
 	"github.com/fluxcd/pkg/runtime/secrets"
 
@@ -85,9 +86,9 @@ func TestHelmRepositoryReconciler_deleteBeforeFinalizer(t *testing.T) {
 	g.Expect(k8sClient.Delete(ctx, helmrepo)).NotTo(HaveOccurred())
 
 	r := &HelmRepositoryReconciler{
-		Client:        k8sClient,
-		EventRecorder: record.NewFakeRecorder(32),
-		Storage:       testStorage,
+		Client:   k8sClient,
+		Recorder: events.NewFakeRecorder(32, false),
+		Storage:  testStorage,
 	}
 	// NOTE: Only a real API server responds with an error in this scenario.
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(helmrepo)})
@@ -179,6 +180,7 @@ func TestHelmRepositoryReconciler_reconcileStorage(t *testing.T) {
 		assertArtifact   *meta.Artifact
 		assertConditions []metav1.Condition
 		assertPaths      []string
+		assertEvicted    bool
 	}{
 		{
 			name: "garbage collects",
@@ -244,6 +246,7 @@ func TestHelmRepositoryReconciler_reconcileStorage(t *testing.T) {
 			assertPaths: []string{
 				"!/reconcile-storage/invalid.txt",
 			},
+			assertEvicted: true,
 			assertConditions: []metav1.Condition{
 				*conditions.TrueCondition(meta.ReconcilingCondition, meta.ProgressingReason, "building artifact: disappeared from storage"),
 				*conditions.UnknownCondition(meta.ReadyCondition, meta.ProgressingReason, "building artifact: disappeared from storage"),
@@ -275,6 +278,7 @@ func TestHelmRepositoryReconciler_reconcileStorage(t *testing.T) {
 			assertPaths: []string{
 				"!/reconcile-storage/empty-digest.txt",
 			},
+			assertEvicted: true,
 			assertConditions: []metav1.Condition{
 				*conditions.TrueCondition(meta.ReconcilingCondition, meta.ProgressingReason, "building artifact: disappeared from storage"),
 				*conditions.UnknownCondition(meta.ReadyCondition, meta.ProgressingReason, "building artifact: disappeared from storage"),
@@ -306,6 +310,7 @@ func TestHelmRepositoryReconciler_reconcileStorage(t *testing.T) {
 			assertPaths: []string{
 				"!/reconcile-storage/digest-mismatch.txt",
 			},
+			assertEvicted: true,
 			assertConditions: []metav1.Condition{
 				*conditions.TrueCondition(meta.ReconcilingCondition, meta.ProgressingReason, "building artifact: disappeared from storage"),
 				*conditions.UnknownCondition(meta.ReadyCondition, meta.ProgressingReason, "building artifact: disappeared from storage"),
@@ -354,9 +359,11 @@ func TestHelmRepositoryReconciler_reconcileStorage(t *testing.T) {
 					WithScheme(testEnv.GetScheme()).
 					WithStatusSubresource(&sourcev1.HelmRepository{}).
 					Build(),
-				EventRecorder: record.NewFakeRecorder(32),
-				Storage:       testStorage,
-				patchOptions:  getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
+				Recorder:     events.NewFakeRecorder(32, false),
+				Storage:      testStorage,
+				Cache:        cache.New(10, time.Minute),
+				TTL:          time.Minute,
+				patchOptions: getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
 			}
 
 			obj := &sourcev1.HelmRepository{
@@ -367,6 +374,12 @@ func TestHelmRepositoryReconciler_reconcileStorage(t *testing.T) {
 			}
 			if tt.beforeFunc != nil {
 				g.Expect(tt.beforeFunc(obj, testStorage)).To(Succeed())
+			}
+
+			var cachedPath string
+			if a := obj.GetArtifact(); a != nil {
+				cachedPath = a.Path
+				g.Expect(r.Cache.Set(cachedPath, &repo.IndexFile{}, time.Minute)).To(Succeed())
 			}
 
 			g.Expect(r.Client.Create(context.TODO(), obj)).ToNot(HaveOccurred())
@@ -387,6 +400,11 @@ func TestHelmRepositoryReconciler_reconcileStorage(t *testing.T) {
 				g.Expect(obj.Status.Artifact.URL).To(Equal(tt.assertArtifact.URL))
 			}
 			g.Expect(obj.Status.Conditions).To(conditions.MatchConditions(tt.assertConditions))
+
+			if cachedPath != "" {
+				_, ok := r.Cache.Get(cachedPath)
+				g.Expect(ok).To(Equal(!tt.assertEvicted))
+			}
 
 			for _, p := range tt.assertPaths {
 				absoluteP := filepath.Join(testStorage.BasePath, p)
@@ -1028,11 +1046,11 @@ func TestHelmRepositoryReconciler_reconcileSource(t *testing.T) {
 			}
 
 			r := &HelmRepositoryReconciler{
-				EventRecorder: record.NewFakeRecorder(32),
-				Client:        clientBuilder.Build(),
-				Storage:       testStorage,
-				Getters:       testGetters,
-				patchOptions:  getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
+				Recorder:     events.NewFakeRecorder(32, false),
+				Client:       clientBuilder.Build(),
+				Storage:      testStorage,
+				Getters:      testGetters,
+				patchOptions: getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
 			}
 			if tt.beforeFunc != nil {
 				tt.beforeFunc(g, obj)
@@ -1072,7 +1090,168 @@ func TestHelmRepositoryReconciler_reconcileSource(t *testing.T) {
 	}
 }
 
+func TestHelmRepositoryReconciler_reconcileSource_cachedIndexFile(t *testing.T) {
+	newReconciler := func(g *WithT, c client.Client) *HelmRepositoryReconciler {
+		return &HelmRepositoryReconciler{
+			Recorder:     events.NewFakeRecorder(32, false),
+			Client:       c,
+			Storage:      testStorage,
+			Getters:      testGetters,
+			patchOptions: getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
+		}
+	}
+
+	startServer := func(g *WithT, index []byte) *helmtestserver.HelmServer {
+		server, err := helmtestserver.NewTempHelmServer()
+		g.Expect(err).NotTo(HaveOccurred())
+		if index == nil {
+			g.Expect(server.PackageChart("testdata/charts/helmchart")).To(Succeed())
+			g.Expect(server.GenerateIndex()).To(Succeed())
+		} else {
+			g.Expect(os.WriteFile(filepath.Join(server.Root(), "index.yaml"), index, 0o600)).To(Succeed())
+		}
+		server.Start()
+		return server
+	}
+
+	newObject := func(url string) *sourcev1.HelmRepository {
+		return &sourcev1.HelmRepository{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "index-cache",
+				Namespace:  "default",
+				Generation: 1,
+			},
+			Spec: sourcev1.HelmRepositorySpec{
+				Interval: metav1.Duration{Duration: interval},
+				Timeout:  &metav1.Duration{Duration: timeout},
+				URL:      url,
+			},
+		}
+	}
+
+	chartIndexFiles := func(g *WithT, dir string) []string {
+		matches, err := filepath.Glob(filepath.Join(dir, "chart-index-*.yaml"))
+		g.Expect(err).NotTo(HaveOccurred())
+		return matches
+	}
+
+	t.Run("invalid index removes cached file", func(t *testing.T) {
+		g := NewWithT(t)
+		dir := t.TempDir()
+		t.Setenv("TMPDIR", dir)
+
+		// HTTP 200 with a body that is not a Helm index. Download succeeds
+		// and LoadFromPath fails.
+		server := startServer(g, []byte("{}\n"))
+		defer server.Stop()
+		defer os.RemoveAll(server.Root())
+
+		c := fakeclient.NewClientBuilder().
+			WithScheme(testEnv.GetScheme()).
+			WithStatusSubresource(&sourcev1.HelmRepository{}).
+			Build()
+		obj := newObject(server.URL())
+		g.Expect(c.Create(context.TODO(), obj)).To(Succeed())
+
+		var chartRepo repository.ChartRepository
+		got, err := newReconciler(g, c).reconcileSource(context.TODO(), patch.NewSerialPatcher(obj, c), obj, &meta.Artifact{}, &chartRepo)
+
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("failed to load Helm repository from index YAML at " + server.URL() + ":"))
+		g.Expect(got).To(Equal(sreconcile.ResultEmpty))
+		g.Expect(conditions.IsTrue(obj, sourcev1.FetchFailedCondition)).To(BeTrue())
+		g.Expect(conditions.GetMessage(obj, sourcev1.FetchFailedCondition)).To(ContainSubstring("failed to load Helm repository from index YAML at " + server.URL() + ":"))
+		g.Expect(chartIndexFiles(g, dir)).To(BeEmpty())
+	})
+
+	t.Run("invalid index message redacts credentials in the URL", func(t *testing.T) {
+		g := NewWithT(t)
+		dir := t.TempDir()
+		t.Setenv("TMPDIR", dir)
+
+		server := startServer(g, []byte("{}\n"))
+		defer server.Stop()
+		defer os.RemoveAll(server.Root())
+
+		c := fakeclient.NewClientBuilder().
+			WithScheme(testEnv.GetScheme()).
+			WithStatusSubresource(&sourcev1.HelmRepository{}).
+			Build()
+		obj := newObject(strings.Replace(server.URL(), "http://", "http://user:s3cr3t@", 1))
+		g.Expect(c.Create(context.TODO(), obj)).To(Succeed())
+
+		var chartRepo repository.ChartRepository
+		_, err := newReconciler(g, c).reconcileSource(context.TODO(), patch.NewSerialPatcher(obj, c), obj, &meta.Artifact{}, &chartRepo)
+
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("failed to load Helm repository from index YAML at"))
+		g.Expect(err.Error()).To(ContainSubstring("user:xxxxx@"))
+		g.Expect(err.Error()).ToNot(ContainSubstring("s3cr3t"))
+		g.Expect(conditions.GetMessage(obj, sourcev1.FetchFailedCondition)).ToNot(ContainSubstring("s3cr3t"))
+	})
+
+	t.Run("status patch failure removes cached file", func(t *testing.T) {
+		g := NewWithT(t)
+		dir := t.TempDir()
+		t.Setenv("TMPDIR", dir)
+
+		server := startServer(g, nil)
+		defer server.Stop()
+		defer os.RemoveAll(server.Root())
+
+		base := fakeclient.NewClientBuilder().
+			WithScheme(testEnv.GetScheme()).
+			WithStatusSubresource(&sourcev1.HelmRepository{}).
+			Build()
+		c := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+				return errors.New("injected patch failure")
+			},
+		})
+		obj := newObject(server.URL())
+		g.Expect(c.Create(context.TODO(), obj)).To(Succeed())
+
+		var chartRepo repository.ChartRepository
+		got, err := newReconciler(g, c).reconcileSource(context.TODO(), patch.NewSerialPatcher(obj, c), obj, &meta.Artifact{}, &chartRepo)
+
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("injected patch failure"))
+		g.Expect(got).To(Equal(sreconcile.ResultEmpty))
+		g.Expect(chartIndexFiles(g, dir)).To(BeEmpty())
+	})
+
+	t.Run("successful fetch keeps cached file", func(t *testing.T) {
+		g := NewWithT(t)
+		dir := t.TempDir()
+		t.Setenv("TMPDIR", dir)
+
+		server := startServer(g, nil)
+		defer server.Stop()
+		defer os.RemoveAll(server.Root())
+
+		c := fakeclient.NewClientBuilder().
+			WithScheme(testEnv.GetScheme()).
+			WithStatusSubresource(&sourcev1.HelmRepository{}).
+			Build()
+		obj := newObject(server.URL())
+		g.Expect(c.Create(context.TODO(), obj)).To(Succeed())
+
+		var chartRepo repository.ChartRepository
+		got, err := newReconciler(g, c).reconcileSource(context.TODO(), patch.NewSerialPatcher(obj, c), obj, &meta.Artifact{}, &chartRepo)
+		defer os.Remove(chartRepo.Path)
+
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(got).To(Equal(sreconcile.ResultSuccess))
+		matches := chartIndexFiles(g, dir)
+		g.Expect(matches).To(Equal([]string{chartRepo.Path}))
+	})
+}
+
 func TestHelmRepositoryReconciler_reconcileArtifact(t *testing.T) {
+	// The cache is at capacity with the previous revision and an index of
+	// another repository, the new revision can only be added after eviction.
+	evictCache := cache.New(2, time.Minute)
+
 	tests := []struct {
 		name             string
 		cache            *cache.Cache
@@ -1113,6 +1292,32 @@ func TestHelmRepositoryReconciler_reconcileArtifact(t *testing.T) {
 				i, ok := cache.Get(obj.GetArtifact().Path)
 				t.Expect(ok).To(BeTrue())
 				t.Expect(i).To(BeAssignableToTypeOf(&repo.IndexFile{}))
+			},
+			assertConditions: []metav1.Condition{
+				*conditions.TrueCondition(sourcev1.ArtifactInStorageCondition, meta.SucceededReason, "stored artifact: revision 'existing'"),
+			},
+		},
+		{
+			name:  "Archiving new revision evicts the previous revision from cache",
+			cache: evictCache,
+			beforeFunc: func(t *WithT, obj *sourcev1.HelmRepository, artifact meta.Artifact, index *repository.ChartRepository) {
+				index.Index = &repo.IndexFile{
+					APIVersion: "v1",
+					Generated:  time.Now(),
+				}
+				obj.Spec.Interval = metav1.Duration{Duration: interval}
+				prev := testStorage.NewArtifactFor(obj.Kind, obj, "previous", "index-previous.yaml")
+				obj.Status.Artifact = &prev
+				t.Expect(evictCache.Set(prev.Path, &repo.IndexFile{}, time.Minute)).To(Succeed())
+				t.Expect(evictCache.Set("helmrepository/default/other/index-other.yaml", &repo.IndexFile{}, time.Minute)).To(Succeed())
+			},
+			want: sreconcile.ResultSuccess,
+			afterFunc: func(t *WithT, obj *sourcev1.HelmRepository, c *cache.Cache) {
+				t.Expect(c.ItemCount()).To(Equal(2))
+				_, ok := c.Get(obj.GetArtifact().Path)
+				t.Expect(ok).To(BeTrue())
+				_, ok = c.Get("helmrepository/default/other/index-other.yaml")
+				t.Expect(ok).To(BeTrue())
 			},
 			assertConditions: []metav1.Condition{
 				*conditions.TrueCondition(sourcev1.ArtifactInStorageCondition, meta.SucceededReason, "stored artifact: revision 'existing'"),
@@ -1171,11 +1376,11 @@ func TestHelmRepositoryReconciler_reconcileArtifact(t *testing.T) {
 					WithScheme(testEnv.GetScheme()).
 					WithStatusSubresource(&sourcev1.HelmRepository{}).
 					Build(),
-				EventRecorder: record.NewFakeRecorder(32),
-				Storage:       testStorage,
-				Cache:         tt.cache,
-				TTL:           1 * time.Minute,
-				patchOptions:  getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
+				Recorder:     events.NewFakeRecorder(32, false),
+				Storage:      testStorage,
+				Cache:        tt.cache,
+				TTL:          1 * time.Minute,
+				patchOptions: getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
 			}
 
 			obj := &sourcev1.HelmRepository{
@@ -1220,6 +1425,59 @@ func TestHelmRepositoryReconciler_reconcileArtifact(t *testing.T) {
 			if tt.afterFunc != nil {
 				tt.afterFunc(g, obj, tt.cache)
 			}
+		})
+	}
+}
+
+func TestHelmRepositoryReconciler_garbageCollectEvictsCache(t *testing.T) {
+	tests := []struct {
+		name       string
+		beforeFunc func(obj *sourcev1.HelmRepository)
+	}{
+		{
+			name: "deleted object",
+			beforeFunc: func(obj *sourcev1.HelmRepository) {
+				obj.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+			},
+		},
+		{
+			name: "type changed to OCI",
+			beforeFunc: func(obj *sourcev1.HelmRepository) {
+				obj.Spec.Type = sourcev1.HelmRepositoryTypeOCI
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			c := cache.New(10, time.Minute)
+			r := &HelmRepositoryReconciler{
+				Recorder: events.NewFakeRecorder(32, false),
+				Storage:  testStorage,
+				Cache:    c,
+				TTL:      time.Minute,
+			}
+
+			obj := &sourcev1.HelmRepository{
+				TypeMeta: metav1.TypeMeta{
+					Kind: sourcev1.HelmRepositoryKind,
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cache-evict",
+					Namespace: "default",
+				},
+			}
+			artifact := testStorage.NewArtifactFor(obj.Kind, obj, "existing", "index-existing.yaml")
+			obj.Status.Artifact = &artifact
+			g.Expect(c.Set(artifact.Path, &repo.IndexFile{}, time.Minute)).To(Succeed())
+
+			tt.beforeFunc(obj)
+
+			g.Expect(r.garbageCollect(context.TODO(), obj)).To(Succeed())
+			g.Expect(obj.GetArtifact()).To(BeNil())
+			g.Expect(c.ItemCount()).To(Equal(0))
 		})
 	}
 }
@@ -1443,7 +1701,7 @@ func TestHelmRepositoryReconciler_statusConditions(t *testing.T) {
 			}
 
 			ctx := context.TODO()
-			summarizeHelper := summarize.NewHelper(record.NewFakeRecorder(32), serialPatcher)
+			summarizeHelper := summarize.NewHelper(events.NewFakeRecorder(32, false), serialPatcher)
 			summarizeOpts := []summarize.Option{
 				summarize.WithConditions(helmRepositoryReadyCondition),
 				summarize.WithReconcileResult(sreconcile.ResultSuccess),
@@ -1469,7 +1727,7 @@ func TestHelmRepositoryReconciler_notify(t *testing.T) {
 		resErr           error
 		oldObjBeforeFunc func(obj *sourcev1.HelmRepository)
 		newObjBeforeFunc func(obj *sourcev1.HelmRepository)
-		wantEvent        string
+		wantEvent        *corev1.Event
 	}{
 		{
 			name:   "error - no event",
@@ -1483,7 +1741,12 @@ func TestHelmRepositoryReconciler_notify(t *testing.T) {
 			newObjBeforeFunc: func(obj *sourcev1.HelmRepository) {
 				obj.Status.Artifact = &meta.Artifact{Revision: "xxx", Digest: "yyy", Size: nil}
 			},
-			wantEvent: "Normal NewArtifact stored fetched index of unknown size",
+			wantEvent: &corev1.Event{
+				Type:    corev1.EventTypeNormal,
+				Reason:  sourcev1.NewArtifactReason,
+				Action:  sourcev1.ActionReconcile.String(),
+				Message: "stored fetched index of unknown size",
+			},
 		},
 		{
 			name:   "new artifact",
@@ -1492,7 +1755,12 @@ func TestHelmRepositoryReconciler_notify(t *testing.T) {
 			newObjBeforeFunc: func(obj *sourcev1.HelmRepository) {
 				obj.Status.Artifact = &meta.Artifact{Revision: "xxx", Digest: "yyy", Size: &aSize}
 			},
-			wantEvent: "Normal NewArtifact stored fetched index of size",
+			wantEvent: &corev1.Event{
+				Type:    corev1.EventTypeNormal,
+				Reason:  sourcev1.NewArtifactReason,
+				Action:  sourcev1.ActionReconcile.String(),
+				Message: "stored fetched index of size",
+			},
 		},
 		{
 			name:   "recovery from failure",
@@ -1507,7 +1775,12 @@ func TestHelmRepositoryReconciler_notify(t *testing.T) {
 				obj.Status.Artifact = &meta.Artifact{Revision: "xxx", Digest: "yyy", Size: &aSize}
 				conditions.MarkTrue(obj, meta.ReadyCondition, meta.SucceededReason, "ready")
 			},
-			wantEvent: "Normal Succeeded stored fetched index of size",
+			wantEvent: &corev1.Event{
+				Type:    corev1.EventTypeNormal,
+				Reason:  meta.SucceededReason,
+				Action:  sourcev1.ActionReconcile.String(),
+				Message: "stored fetched index of size",
+			},
 		},
 		{
 			name:   "recovery and new artifact",
@@ -1522,7 +1795,12 @@ func TestHelmRepositoryReconciler_notify(t *testing.T) {
 				obj.Status.Artifact = &meta.Artifact{Revision: "aaa", Digest: "bbb", Size: &aSize}
 				conditions.MarkTrue(obj, meta.ReadyCondition, meta.SucceededReason, "ready")
 			},
-			wantEvent: "Normal NewArtifact stored fetched index of size",
+			wantEvent: &corev1.Event{
+				Type:    corev1.EventTypeNormal,
+				Reason:  sourcev1.NewArtifactReason,
+				Action:  sourcev1.ActionReconcile.String(),
+				Message: "stored fetched index of size",
+			},
 		},
 		{
 			name:   "no updates",
@@ -1542,7 +1820,7 @@ func TestHelmRepositoryReconciler_notify(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
-			recorder := record.NewFakeRecorder(32)
+			recorder := events.NewFakeRecorder(32, false)
 
 			oldObj := &sourcev1.HelmRepository{}
 			newObj := oldObj.DeepCopy()
@@ -1555,8 +1833,8 @@ func TestHelmRepositoryReconciler_notify(t *testing.T) {
 			}
 
 			reconciler := &HelmRepositoryReconciler{
-				EventRecorder: recorder,
-				patchOptions:  getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
+				Recorder:     recorder,
+				patchOptions: getPatchOptions(helmRepositoryReadyCondition.Owned, "sc"),
 			}
 			chartRepo := repository.ChartRepository{
 				URL: "some-address",
@@ -1565,12 +1843,15 @@ func TestHelmRepositoryReconciler_notify(t *testing.T) {
 
 			select {
 			case x, ok := <-recorder.Events:
-				g.Expect(ok).To(Equal(tt.wantEvent != ""), "unexpected event received")
-				if tt.wantEvent != "" {
-					g.Expect(x).To(ContainSubstring(tt.wantEvent))
+				g.Expect(ok).To(Equal(tt.wantEvent != nil), "unexpected event received")
+				if tt.wantEvent != nil {
+					g.Expect(x.Type).To(Equal(tt.wantEvent.Type))
+					g.Expect(x.Reason).To(Equal(tt.wantEvent.Reason))
+					g.Expect(x.Action).To(Equal(tt.wantEvent.Action))
+					g.Expect(x.Message).To(ContainSubstring(tt.wantEvent.Message))
 				}
 			default:
-				if tt.wantEvent != "" {
+				if tt.wantEvent != nil {
 					t.Errorf("expected some event to be emitted")
 				}
 			}

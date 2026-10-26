@@ -288,6 +288,13 @@ type GitRepositoryStatus struct {
 	// +optional
 	ObservedSparseCheckout []string `json:"observedSparseCheckout,omitempty"`
 
+	// SourceVerificationFingerprint is the fingerprint of the public keys used
+	// to verify the signature of the Git object(s) for the current Artifact.
+	// It is used to detect changes to the verification policy, such as a key
+	// rotation, that require the current revision to be verified again.
+	// +optional
+	SourceVerificationFingerprint string `json:"sourceVerificationFingerprint,omitempty"`
+
 	// SourceVerificationMode is the last used verification mode indicating
 	// which Git object(s) have been verified.
 	// +optional
@@ -359,7 +366,11 @@ func (v *GitRepositoryVerification) VerifyTag() bool {
 // +genclient
 // +kubebuilder:storageversion
 // +kubebuilder:object:root=true
+<<<<<<< HEAD
 // +kubebuilder:resource:shortName=qdrantgitrepo,categories=all;fluxcd;fluxcd-sources
+=======
+// +kubebuilder:resource:shortName=gitrepo,categories=all;fluxcd;fluxcd-sources
+>>>>>>> refs/upstream-tags/v1.10.0
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.spec.url`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description=""
@@ -383,8 +394,4 @@ type GitRepositoryList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []GitRepository `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&GitRepository{}, &GitRepositoryList{})
 }

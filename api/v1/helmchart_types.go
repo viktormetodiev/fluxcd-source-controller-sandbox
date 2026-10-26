@@ -195,7 +195,11 @@ func (in *HelmChart) GetValuesFiles() []string {
 // +genclient
 // +kubebuilder:storageversion
 // +kubebuilder:object:root=true
+<<<<<<< HEAD
 // +kubebuilder:resource:shortName=qdranthc,categories=all;fluxcd;fluxcd-sources
+=======
+// +kubebuilder:resource:shortName=hc,categories=all;fluxcd;fluxcd-sources
+>>>>>>> refs/upstream-tags/v1.10.0
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Chart",type=string,JSONPath=`.spec.chart`
 // +kubebuilder:printcolumn:name="Version",type=string,JSONPath=`.spec.version`
@@ -222,8 +226,4 @@ type HelmChartList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []HelmChart `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&HelmChart{}, &HelmChartList{})
 }

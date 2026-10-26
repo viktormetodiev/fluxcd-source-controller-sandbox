@@ -195,7 +195,11 @@ func (in *HelmRepository) GetArtifact() *meta.Artifact {
 // +genclient
 // +kubebuilder:storageversion
 // +kubebuilder:object:root=true
+<<<<<<< HEAD
 // +kubebuilder:resource:shortName=qdranthelmrepo,categories=all;fluxcd;fluxcd-sources
+=======
+// +kubebuilder:resource:shortName=helmrepo,categories=all;fluxcd;fluxcd-sources
+>>>>>>> refs/upstream-tags/v1.10.0
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.spec.url`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description=""
@@ -219,8 +223,4 @@ type HelmRepositoryList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []HelmRepository `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&HelmRepository{}, &HelmRepositoryList{})
 }

@@ -308,7 +308,7 @@ For a full list of available regions and their endpoints, see the
     spec:
       interval: 5m0s
       provider: aws
-      serviceAccountName: my-tenant # optional (used for object-level workload identity)
+      serviceAccountName: my-tenant # optional (used for object identity)
       url: https://git-codecommit.<region>.amazonaws.com/v1/repos/<repository-name>
       ref:
         branch: main
@@ -406,7 +406,7 @@ The `github` provider can be used to authenticate to Git repositories using
 The GitHub App information is specified in `.spec.secretRef` in the format
 specified below:
 
-- Get the App ID from the app settings page at `https://github.com/settings/apps/<app-name>`.
+- Get the App ID or Client ID from the app settings page at `https://github.com/settings/apps/<app-name>`.
 - The private key that was generated in the pre-requisites.
 - (Optional) GitHub Enterprise Server users can set the base URL to
   `http(s)://HOSTNAME/api/v3`.
@@ -426,6 +426,7 @@ metadata:
 type: Opaque
 stringData:
   githubAppID: "<app-id>"
+  githubAppClientID: "<client-id>"
   githubAppInstallationOwner: "<github-org-or-user>"
   githubAppInstallationID: "<app-installation-id>"
   githubAppPrivateKey: |
@@ -438,6 +439,9 @@ stringData:
     ...
     -----END CERTIFICATE-----
 ```
+
+Exactly one of `githubAppID` or `githubAppClientID` must be provided.
+If neither or both are provided, the reconciliation will fail with a misconfiguration error.
 
 Exactly one of `githubAppInstallationOwner` or `githubAppInstallationID` must be provided.
 If neither or both are provided, the reconciliation will fail with a misconfiguration error.
@@ -461,10 +465,12 @@ in the same namespace as GitRepository with purpose depending on the value of
 the `.spec.provider` field:
 
 - When `.spec.provider` is set to `azure`, the Service Account
-  will be used for Workload Identity authentication. In this case, the controller
-  feature gate `ObjectLevelWorkloadIdentity` must be enabled, otherwise the
-  controller will error out. For Azure DevOps specific setup, see the
+  will be used to acquire an object identity. For Azure DevOps specific setup, see the
   [Azure DevOps integration guide](https://fluxcd.io/flux/integrations/azure/#for-azure-devops).
+
+For a complete guide to the ServiceAccount annotations used for object
+identity, including the `spiffe` credential provider, see the
+[Object Identity](/flux/integrations/object-identity/) docs.
 
 **Note:** that for a publicly accessible git repository, you don't need to
 provide a `secretRef` nor `serviceAccountName`.
@@ -607,8 +613,9 @@ spec:
 ``` 
 
 This field takes precedence over all other fields. It can be combined with
-`.spec.ref.branch` to perform a shallow clone of the branch, in which the
-commit must exist:
+`.spec.ref.branch` to restrict the clone to a single branch, in which the
+commit must exist. Note that this is not a shallow clone: the commit is
+fetched with the full history of that branch.
 
 ```yaml
 ---
@@ -1340,6 +1347,16 @@ repository to create an artifact in the GitRepository's
 mode in spec](#verification). The verification status is applicable only to the
 latest Git repository revision used to successfully build and store an
 artifact.
+
+### Source Verification Fingerprint
+
+The source-controller reports a fingerprint of the public keys it used to verify
+the Git object(s) in the GitRepository's
+`.status.sourceVerificationFingerprint`. The fingerprint is derived from the key
+material in the referenced Secret and does not depend on the Secret name or the
+Secret data key names. It is used by the controller to detect a change in the
+verification policy, such as a key rotation, that requires the current revision
+to be verified again even when its revision did not change.
 
 ### Observed Generation
 

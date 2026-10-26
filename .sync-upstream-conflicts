@@ -1,0 +1,13 @@
+CHANGELOG.md
+api/go.mod
+api/go.sum
+api/v1/gitrepository_types.go
+api/v1/helmchart_types.go
+api/v1/helmrepository_types.go
+api/v1/ocirepository_types.go
+config/manager/kustomization.yaml
+docs/README.md
+docs/api/v1/source.md
+docs/spec/v1/buckets.md
+go.mod
+go.sum

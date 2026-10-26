@@ -58,8 +58,8 @@ type OCIRepositorySpec struct {
 	// URL is a reference to an OCI artifact repository hosted
 	// on a remote container registry.
 	// +kubebuilder:validation:Pattern="^oci://.*$"
-	// +required
-	URL string `json:"url"`
+	// +optional
+	URL string `json:"url,omitempty"`
 
 	// The OCI reference to pull and monitor for changes,
 	// defaults to the latest tag.
@@ -74,7 +74,6 @@ type OCIRepositorySpec struct {
 	// The provider used for authentication, can be 'aws', 'azure', 'gcp' or 'generic'.
 	// When not specified, defaults to 'generic'.
 	// +kubebuilder:validation:Enum=generic;aws;azure;gcp
-	// +kubebuilder:default:=generic
 	// +optional
 	Provider string `json:"provider,omitempty"`
 
@@ -91,7 +90,11 @@ type OCIRepositorySpec struct {
 	Verify *OCIRepositoryVerification `json:"verify,omitempty"`
 
 	// ServiceAccountName is the name of the Kubernetes ServiceAccount used to authenticate
-	// the image pull if the service account has attached pull secrets. For more information:
+	// the image pull, either with the pull secrets attached to the service account or with
+	// an object identity.
+	// For more information about object identity:
+	// https://fluxcd.io/flux/integrations/object-identity/
+	// For more information about image pull secrets:
 	// https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#add-imagepullsecrets-to-a-service-account
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
@@ -121,11 +124,10 @@ type OCIRepositorySpec struct {
 	// efficient use of resources.
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:Pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"
-	// +required
-	Interval metav1.Duration `json:"interval"`
+	// +optional
+	Interval *metav1.Duration `json:"interval,omitempty"`
 
 	// The timeout for remote OCI Repository operations like pulling, defaults to 60s.
-	// +kubebuilder:default="60s"
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:Pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m))+$"
 	// +optional
@@ -212,6 +214,13 @@ type OCIRepositoryStatus struct {
 	// +optional
 	ObservedLayerSelector *OCILayerSelector `json:"observedLayerSelector,omitempty"`
 
+	// SourceVerificationFingerprint is the fingerprint of the verification
+	// material used to verify the signature of the current Artifact. It is
+	// used to detect changes to the verification policy, such as a key
+	// rotation, that require the current revision to be verified again.
+	// +optional
+	SourceVerificationFingerprint string `json:"sourceVerificationFingerprint,omitempty"`
+
 	meta.ReconcileRequestStatus `json:",inline"`
 }
 
@@ -236,6 +245,9 @@ func (in *OCIRepository) SetConditions(conditions []metav1.Condition) {
 // GetRequeueAfter returns the duration after which the OCIRepository must be
 // reconciled again.
 func (in OCIRepository) GetRequeueAfter() time.Duration {
+	if in.Spec.Interval == nil {
+		return 0
+	}
 	return in.Spec.Interval.Duration
 }
 
@@ -243,6 +255,14 @@ func (in OCIRepository) GetRequeueAfter() time.Duration {
 // the status sub-resource.
 func (in *OCIRepository) GetArtifact() *meta.Artifact {
 	return in.Status.Artifact
+}
+
+// GetProvider returns the OCI authentication provider, defaulting to generic.
+func (in *OCIRepository) GetProvider() string {
+	if in.Spec.Provider == "" {
+		return GenericOCIProvider
+	}
+	return in.Spec.Provider
 }
 
 // GetLayerMediaType returns the media type layer selector if found in spec.
@@ -263,16 +283,33 @@ func (in *OCIRepository) GetLayerOperation() string {
 	return in.Spec.LayerSelector.Operation
 }
 
+// GetTimeout applies the 60s default via code to avoid using the CRD schema default.
+func (in *OCIRepository) GetTimeout() time.Duration {
+	if in.Spec.Timeout == nil {
+		return 60 * time.Second
+	}
+	return in.Spec.Timeout.Duration
+}
+
 // +genclient
 // +kubebuilder:storageversion
 // +kubebuilder:object:root=true
+<<<<<<< HEAD
 // +kubebuilder:resource:shortName=qdrantocirepo,categories=all;fluxcd;fluxcd-sources
+=======
+// +kubebuilder:resource:shortName=ocirepo,categories=all;fluxcd;fluxcd-sources
+>>>>>>> refs/upstream-tags/v1.10.0
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.spec.url`
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status",description=""
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].message",description=""
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description=""
 // +kubebuilder:metadata:annotations="kustomize.toolkit.fluxcd.io/substitute=disabled"
+<<<<<<< HEAD
+=======
+// +kubebuilder:validation:XValidation:rule="has(self.spec) && has(self.spec.url)",message="spec.url is required"
+// +kubebuilder:validation:XValidation:rule="has(self.spec) && has(self.spec.interval)",message="spec.interval is required"
+>>>>>>> refs/upstream-tags/v1.10.0
 
 // OCIRepository is the Schema for the ocirepositories API
 type OCIRepository struct {
@@ -290,8 +327,4 @@ type OCIRepositoryList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []OCIRepository `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&OCIRepository{}, &OCIRepositoryList{})
 }

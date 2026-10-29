@@ -2,6 +2,189 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.10.1
+
+**Release date:** 2026-10-26
+
+This patch release hardens the controller's artifact server by setting a read
+header timeout, which also bounds the TLS handshake, and an idle timeout. As a
+result, connections that never send a request, or keep-alive connections from
+clients without an idle timeout, no longer stay open until the server shuts
+down. No timeout is set for reading or writing the whole request, so large
+artifacts can still be downloaded by slow clients.
+
+Improvements:
+- Update fluxcd/pkg dependencies
+  [#2217](https://github.com/fluxcd/source-controller/pull/2217)
+
+## 1.10.0
+
+**Release date:** 2026-10-24
+
+This minor release graduates object-level workload identity, now renamed to
+object identity, introduces SPIFFE mTLS between the controllers, and adds
+GitHub App Client ID support for Git repositories.
+
+### Object Identity
+
+Object-level workload identity is now generally available and renamed to object
+identity. Workload identity refers exclusively to identities assigned to Flux
+controllers, while object identity refers to identities assigned to Flux
+objects. The `ObjectLevelWorkloadIdentity` feature gate is retired and the
+feature is always enabled.
+
+⚠️ **Breaking change:** the default Flux RBAC no longer grants the `create`
+verb on the `serviceaccounts/token` resource. If your installation relies on
+the default RBAC, bind a ClusterRole with this permission to the controller
+ServiceAccount before upgrading. See
+[fluxcd/flux2#6139](https://github.com/fluxcd/flux2/pull/6139) for the required
+ClusterRole and ClusterRoleBinding, and the
+[object identity documentation](https://fluxcd.io/flux/integrations/object-identity/)
+for the API reference.
+
+Two credential providers can now supply the credential: `kubernetes`, which
+uses the Kubernetes TokenRequest API and was already available, and `spiffe`,
+which fetches a JWT-SVID from the SPIFFE Broker API. The provider is configured
+on the ServiceAccount with `credential.auth.fluxcd.io/provider`, independently
+of the service provider in `.spec.provider`.
+
+### Inter-Controller mTLS
+
+This release introduces SPIFFE mTLS for inter-controller communication. Flux
+controllers authenticate each other with X.509-SVIDs, and each traffic type is
+enabled independently by configuring the SPIFFE Workload API socket and the
+SPIFFE IDs that the controller authorizes. See the
+[inter-controller mTLS documentation](https://fluxcd.io/flux/installation/configuration/intercontroller-mtls/)
+for the controller flags and an example configuration.
+
+### GitRepository
+
+GitHub App authentication accepts a Client ID as an alternative to the numeric
+App ID (`githubAppClientID`). Signature verification is re-run when the trusted
+keys rotate, so a revoked or replaced key no longer leaves a stale
+`SourceVerified=True` condition.
+
+### OCIRepository
+
+Generic OCI repositories now support object identity. The credential is sent as
+a bearer token, or as the password in HTTP basic authentication when
+`credential.auth.fluxcd.io/username` is set. Audiences default to the registry
+host and can be overridden with `credential.auth.fluxcd.io/audiences`.
+
+Signature verification is re-run when the verification keys rotate, and the
+origin revision from OCI image metadata is forwarded in events.
+
+### ExternalArtifact
+
+A new `.status.exportedInputs` field exposes structured data extracted from the
+source resource, for consumers such as ResourceSet to implement templating.
+
+### General updates
+
+The controller is built with Kubernetes 1.37 and Go 1.27.
+
+Fixes:
+- Close GCP object streams on error paths
+  [#2053](https://github.com/fluxcd/source-controller/pull/2053)
+- Close Azure blob streams on error paths
+  [#2200](https://github.com/fluxcd/source-controller/pull/2200)
+- Remove leaked Helm index cache on reconcile errors
+  [#2201](https://github.com/fluxcd/source-controller/pull/2201)
+  [#2202](https://github.com/fluxcd/source-controller/pull/2202)
+- Purge stale temp dirs at startup
+  [#2176](https://github.com/fluxcd/source-controller/pull/2176)
+- Include the repository URL in Helm index parse errors
+  [#2063](https://github.com/fluxcd/source-controller/pull/2063)
+- Support the AWS `ap-southeast-6` region for Bucket sources
+  [#2183](https://github.com/fluxcd/source-controller/pull/2183)
+
+Improvements:
+- Support Kubernetes ServiceAccount tokens for `generic` OCI repositories
+  [#2192](https://github.com/fluxcd/source-controller/pull/2192)
+- Add the `spiffe` credential provider and SPIFFE Broker API
+  [#2197](https://github.com/fluxcd/source-controller/pull/2197)
+- Retire the `ObjectLevelWorkloadIdentity` feature gate
+  [#2197](https://github.com/fluxcd/source-controller/pull/2197)
+- Add SPIFFE mTLS between the controllers
+  [#2194](https://github.com/fluxcd/source-controller/pull/2194)
+- Add GitHub App Client ID support
+  [#2168](https://github.com/fluxcd/source-controller/pull/2168)
+- Reverify sources when verification keys rotate
+  [#2166](https://github.com/fluxcd/source-controller/pull/2166)
+  [#2179](https://github.com/fluxcd/source-controller/pull/2179)
+- Expose the OCI origin revision in events
+  [#2127](https://github.com/fluxcd/source-controller/pull/2127)
+- Add ExternalArtifact exported inputs
+  [#2182](https://github.com/fluxcd/source-controller/pull/2182)
+- Update to Kubernetes 1.37 and Go 1.27
+  [#2162](https://github.com/fluxcd/source-controller/pull/2162)
+  [#2186](https://github.com/fluxcd/source-controller/pull/2186)
+- Various dependency updates
+  [#2100](https://github.com/fluxcd/source-controller/pull/2100)
+  [#2203](https://github.com/fluxcd/source-controller/pull/2203)
+
+## 1.9.6
+
+**Release date:** 2026-10-01
+
+This patch release normalizes Azure Blob listing ETags so that the listing digest
+stays consistent with the stored artifact revision and unchanged containers are no
+longer re-downloaded on every reconcile, and evicts stale Helm repository index
+entries from the cache so that repositories with frequently changing indexes no
+longer fail with "Cache is full".
+
+Fixes:
+- Normalize Azure listing ETags
+  [#2171](https://github.com/fluxcd/source-controller/pull/2171)
+- Evict stale Helm index entries from cache
+  [#2152](https://github.com/fluxcd/source-controller/pull/2152)
+
+Improvements:
+- Replace MinIO server with in-process S3 mock in tests
+  [#2153](https://github.com/fluxcd/source-controller/pull/2153)
+- Correct the shallow clone claim for commit plus branch in the GitRepository docs
+  [#2147](https://github.com/fluxcd/source-controller/pull/2147)
+
+## 1.9.5
+
+**Release date:** 2026-08-31
+
+This patch release upgrades Helm to v4.2.4 to stay in sync with helm-controller
+1.6, which moved back from the Flux fork of Helm to upstream. It also updates
+the fluxcd/pkg dependencies, which bring Kubernetes to 1.36.4.
+
+Improvements:
+- Upgrade helm to 4.2.4 (sync with HC 1.6)
+  [#2140](https://github.com/fluxcd/source-controller/pull/2140)
+- Update fluxcd/pkg dependencies
+  [#2141](https://github.com/fluxcd/source-controller/pull/2141)
+  [#2142](https://github.com/fluxcd/source-controller/pull/2142)
+
+## 1.9.4
+
+**Release date:** 2026-08-07
+
+This patch release aligns Helm repository index loading with upstream Helm v4 by
+skipping empty entries, improves the error handling in the `Bucket` reconciler
+for optional fields in Azure responses, resolves OCI Helm charts by digest so
+that verification and download operate on the same content, and limits GCS
+static authentication to secrets holding service account keys. It also updates
+the fluxcd/pkg dependencies, which align the ECR host detection with upstream.
+
+Fixes:
+- Align index loading with upstream Helm v4
+  [#2121](https://github.com/fluxcd/source-controller/pull/2121)
+- Improve error handling in Bucket reconciliation
+  [#2123](https://github.com/fluxcd/source-controller/pull/2123)
+- Pin OCI chart verification by digest
+  [#2125](https://github.com/fluxcd/source-controller/pull/2125)
+- Limit GCS static authentication to service account keys
+  [#2130](https://github.com/fluxcd/source-controller/pull/2130)
+
+Improvements:
+- Update fluxcd/pkg dependencies
+  [#2131](https://github.com/fluxcd/source-controller/pull/2131)
+
 ## 1.9.3
 
 **Release date:** 2026-07-13

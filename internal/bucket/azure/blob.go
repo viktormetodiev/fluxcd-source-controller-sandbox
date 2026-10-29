@@ -311,6 +311,11 @@ func (c *BlobClient) FGetObject(ctx context.Context, bucketName, objectName, loc
 	if err != nil {
 		return "", err
 	}
+	defer func() {
+		if cerr := res.Body.Close(); cerr != nil {
+			ctrl.LoggerFrom(ctx).Error(cerr, "failed to close object reader")
+		}
+	}()
 
 	// Prepare target file.
 	f, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY, 0o600)
@@ -326,8 +331,8 @@ func (c *BlobClient) FGetObject(ctx context.Context, bucketName, objectName, loc
 	// Off we go.
 	mw := io.MultiWriter(f, hash)
 	if _, err = io.Copy(mw, res.Body); err != nil {
-		if err = f.Close(); err != nil {
-			ctrl.LoggerFrom(ctx).Error(err, "failed to close file after copy error")
+		if cerr := f.Close(); cerr != nil {
+			ctrl.LoggerFrom(ctx).Error(cerr, "failed to close file after copy error")
 		}
 		return "", err
 	}
@@ -335,7 +340,21 @@ func (c *BlobClient) FGetObject(ctx context.Context, bucketName, objectName, loc
 		return "", err
 	}
 
-	return string(*res.ETag), nil
+	// The ETag response header is optional and may be absent from
+	// non-conformant storage endpoints.
+	var etag string
+	if res.ETag != nil {
+		etag = string(*res.ETag)
+	}
+	return etag, nil
+}
+
+// quoteETag returns the ETag in the quoted form used by Get Blob responses.
+func quoteETag(etag string) string {
+	if etag == "" || etag[0] == '"' {
+		return etag
+	}
+	return `"` + etag + `"`
 }
 
 // VisitObjects iterates over the items in the provided object storage
@@ -354,8 +373,20 @@ func (c *BlobClient) VisitObjects(ctx context.Context, bucketName string, prefix
 			err = fmt.Errorf("listing objects from bucket '%s' failed: %w", bucketName, err)
 			return err
 		}
+		if resp.Segment == nil {
+			continue
+		}
 		for _, blob := range resp.Segment.BlobItems {
-			if err := visit(*blob.Name, fmt.Sprintf("%x", *blob.Properties.ETag)); err != nil {
+			// The list response fields are optional and may be absent
+			// from non-conformant storage endpoints.
+			if blob == nil || blob.Name == nil {
+				continue
+			}
+			var etag string
+			if blob.Properties != nil && blob.Properties.ETag != nil {
+				etag = quoteETag(string(*blob.Properties.ETag))
+			}
+			if err := visit(*blob.Name, etag); err != nil {
 				err = fmt.Errorf("listing objects from bucket '%s' failed: %w", bucketName, err)
 				return err
 			}

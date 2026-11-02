@@ -37,7 +37,7 @@ jobs:
   # skip quietly instead of failing every week, manual runs fail with a clear
   # error, and dry runs go ahead (they do not need it).
   gate:
-    if: github.repository_owner == 'qdrant'
+    if: github.repository_owner == 'viktormetodiev'
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.gate.outputs.run }}

@@ -40,7 +40,7 @@ func New(token, repository, apiURL string) (*Client, error) {
 // not to take that release.
 func (c *Client) PullRequestExists(ctx context.Context, branch string) (bool, error) {
 	prs, _, err := c.api.PullRequests.List(ctx, c.owner, c.repo, &gh.PullRequestListOptions{
-		State:       "all",
+		State:       "open",
 		Head:        c.owner + ":" + branch,
 		ListOptions: gh.ListOptions{PerPage: 1},
 	})

@@ -67,14 +67,14 @@ func SetupSourceReconcilers(mgr ctrl.Manager, adapter SourceAdapter) error {
 	cacheRecorder := cache.MustMakeMetrics()
 
 	helmIndexCache, helmIndexCacheItemTTL := mustInitHelmCache(0, "15m", "1m")
-	eventRecorder, err := events.NewRecorder(mgr, ctrl.Log, "", adapter.ControllerName)
+	eventRecorder, err := events.NewRecorder(ctrl.Log, "", adapter.ControllerName, events.WithManager(mgr))
 	if err != nil {
 		return err
 	}
 
 	if err := (&controller.HelmRepositoryReconciler{
 		Client:         mgr.GetClient(),
-		EventRecorder:  eventRecorder,
+		Recorder:       eventRecorder,
 		Metrics:        adapter.MetricOptions,
 		Storage:        storage,
 		Getters:        getters,
@@ -91,7 +91,7 @@ func SetupSourceReconcilers(mgr ctrl.Manager, adapter SourceAdapter) error {
 
 	if err := (&controller.GitRepositoryReconciler{
 		Client:         mgr.GetClient(),
-		EventRecorder:  eventRecorder,
+		Recorder:       eventRecorder,
 		Metrics:        adapter.MetricOptions,
 		Storage:        storage,
 		ControllerName: adapter.ControllerName,
@@ -105,7 +105,7 @@ func SetupSourceReconcilers(mgr ctrl.Manager, adapter SourceAdapter) error {
 
 	if err := (&controller.BucketReconciler{
 		Client:         mgr.GetClient(),
-		EventRecorder:  eventRecorder,
+		Recorder:       eventRecorder,
 		Metrics:        adapter.MetricOptions,
 		Storage:        storage,
 		ControllerName: adapter.ControllerName,
@@ -120,7 +120,7 @@ func SetupSourceReconcilers(mgr ctrl.Manager, adapter SourceAdapter) error {
 		Client:         mgr.GetClient(),
 		Storage:        storage,
 		Getters:        getters,
-		EventRecorder:  eventRecorder,
+		Recorder:       eventRecorder,
 		Metrics:        adapter.MetricOptions,
 		ControllerName: adapter.ControllerName,
 		Cache:          helmIndexCache,

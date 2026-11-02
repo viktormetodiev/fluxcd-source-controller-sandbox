@@ -48,7 +48,8 @@ func PRBody(tmpl string, r Result, upstreamURL string) (string, error) {
 		for _, path := range r.Conflicts {
 			fmt.Fprintf(&b, "> - `%s`\n", path)
 		}
-		b.WriteString("\n")
+		b.WriteString(">\n> The rename and the adaptations did not run. Once the conflicts are resolved, run them as a clean sync would: " +
+			"`go -C tools/fork-sync run . --repo ../.. rename`, then each command under `adaptations` in `.github/fork-sync.yaml`.\n\n")
 	}
 	data := prBodyData{Tag: r.Tag, UpstreamURL: strings.TrimSuffix(upstreamURL, ".git")}
 	err = t.Execute(&b, data)

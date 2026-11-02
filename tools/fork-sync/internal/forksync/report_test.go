@@ -42,6 +42,7 @@ func TestPRBody(t *testing.T) {
 		assert.Contains(t, body, "**`make tidy` failed**")
 		assert.Contains(t, body, "> - `a.go`\n> - `b.yaml`\n")
 		assert.Contains(t, body, ConflictsFile)
+		assert.Contains(t, body, "`go -C tools/fork-sync run . --repo ../.. rename`", "how to finish the sync by hand")
 		assert.True(t, strings.HasSuffix(body, "TEMPLATE v1.9.6\n"), "the template comes last")
 	})
 

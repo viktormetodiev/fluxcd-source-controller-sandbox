@@ -3,6 +3,7 @@ package git_test
 import (
 	"bytes"
 	"encoding/base64"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -57,6 +58,21 @@ func TestPushWithToken(t *testing.T) {
 
 		require.NoError(t, repo.PushWithToken("main", token))
 		assert.True(t, remote.Succeeds("rev-parse", "--verify", "refs/heads/main"))
+	})
+
+	t.Run("replaces the branch, without running hooks", func(t *testing.T) {
+		repo := gittest.New(t)
+		remote := gittest.NewBare(t)
+		gittest.Run(t, repo, "remote", "add", "origin", remote.Dir)
+		gittest.Commit(t, repo, "first", gittest.Write("main.go", "package main\n"))
+		require.NoError(t, repo.PushWithToken("main", token))
+
+		gittest.Run(t, repo, "commit", "--quiet", "--amend", "--message", "first, amended")
+		gittest.Apply(t, repo, gittest.Write(".git/hooks/pre-push", "#!/bin/sh\nexit 1\n"))
+		require.NoError(t, os.Chmod(filepath.Join(repo.Dir, ".git/hooks/pre-push"), 0o755))
+
+		require.NoError(t, repo.PushWithToken("main", token))
+		assert.Equal(t, gittest.Run(t, repo, "rev-parse", "HEAD"), gittest.Run(t, remote, "rev-parse", "main"))
 	})
 
 	t.Run("the token never shows up in errors or logs", func(t *testing.T) {

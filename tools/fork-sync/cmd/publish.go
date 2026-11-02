@@ -22,6 +22,10 @@ var publishCmd = &cobra.Command{
 	Long: `Pushes the sync branch to origin and opens its pull request, as a draft when
 the branch has unresolved conflicts. Prints the pull request's url as url=URL.
 
+A sync branch already on origin is replaced: without a pull request (target
+checks there is none), it is what an earlier publish left when it could not open
+the pull request.
+
 It authenticates with the GH_TOKEN environment variable, which must be able to
 push branches, open pull requests and push changes under .github/workflows/.
 GITHUB_TOKEN is not enough: what it pushes and opens does not trigger CI.`,

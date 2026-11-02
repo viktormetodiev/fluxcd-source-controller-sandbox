@@ -22,9 +22,9 @@ ownedPaths:
   # The fork's own tooling, which names upstream's API groups on purpose.
   - tools/
 
-# Files under the owned paths that still take upstream's changes. Upstream's
-# workflows must not be able to read the fork's secrets, so the sync's token is
-# not named like Flux's (BOT_GITHUB_TOKEN).
+# Files under the owned paths that still take upstream's changes. They run with
+# this repository's credentials too, so they must use none of the fork's
+# secrets: review their changes in each sync PR.
 followUpstream:
   # How upstream keeps its dependencies up to date.
   - .github/dependabot.yaml

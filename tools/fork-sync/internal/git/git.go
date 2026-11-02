@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -69,19 +70,31 @@ func (r Repo) NameStatus(args ...string) ([]Change, error) {
 	return changes, nil
 }
 
-// PushWithToken pushes a branch to origin, authenticating to github.com with
-// the given token. The token is passed through git's environment-based
-// configuration, so it does not show up in the command line, in process
-// listings or in error messages.
+// PushWithToken pushes a branch to origin, replacing it if it is already
+// there, and authenticates to github.com with the given token. The token is
+// passed through git's environment-based configuration, so it does not show up
+// in the command line, in process listings or in error messages. Git hooks are
+// turned off, so that nothing in the repository can run with the token.
 func (r Repo) PushWithToken(branch, token string) error {
 	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
 	env := []string{
-		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_COUNT=2",
 		"GIT_CONFIG_KEY_0=http.https://github.com/.extraheader",
 		"GIT_CONFIG_VALUE_0=" + header,
+		"GIT_CONFIG_KEY_1=core.hooksPath",
+		"GIT_CONFIG_VALUE_1=" + os.DevNull,
 	}
-	_, err := r.run(env, "push", "origin", branch)
+	_, err := r.run(env, "push", "--force", "origin", branch)
 	return err
+}
+
+// Exclude returns pathspecs that leave out the given paths.
+func Exclude(paths []string) []string {
+	pathspecs := make([]string, len(paths))
+	for i, path := range paths {
+		pathspecs[i] = ":(exclude)" + path
+	}
+	return pathspecs
 }
 
 func (r Repo) run(env []string, args ...string) (string, error) {

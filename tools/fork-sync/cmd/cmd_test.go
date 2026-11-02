@@ -30,7 +30,11 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	switch r.Method {
 	case http.MethodGet:
-		_, _ = w.Write([]byte(`[]`))
+		if len(f.created) == 0 {
+			_, _ = w.Write([]byte(`[]`))
+		} else {
+			_, _ = w.Write([]byte(`[{"number": 1}]`))
+		}
 	case http.MethodPost:
 		var pr map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&pr)
@@ -93,7 +97,7 @@ func TestTargetMergePublish(t *testing.T) {
 
 	gittest.Run(t, fork, "checkout", "--quiet", "main")
 	out = run(t, "target", "--repo", fork.Dir, "--check-existing")
-	assert.Equal(t, "tag=v1.0.1\nbranch=sync/upstream-v1.0.1\nstatus=exists\n", out, "the sync branch is on origin now")
+	assert.Equal(t, "tag=v1.0.1\nbranch=sync/upstream-v1.0.1\nstatus=exists\n", out, "the pull request exists now")
 }
 
 func TestRejectsUnknownLogLevels(t *testing.T) {

@@ -7,8 +7,15 @@ name: sync-upstream
 # fork up to date" in the README. This file is the same in every Qdrant fork that
 # uses it.
 #
-# With dry_run, everything happens except pushing the branch and opening the pull
-# request. Every run shows the result in the job summary.
+# Two jobs, so that upstream's code never runs where the credentials are:
+#   sync     merges the release. It runs upstream's code (make tidy runs its
+#            Makefile), so it gets no credentials, and hands the branch over as
+#            a git bundle.
+#   publish  pushes that branch and opens the pull request, on a fresh runner,
+#            with tools/fork-sync built from the fork's own code. Only this job
+#            gets the GitHub App's credentials, from the fork-sync environment.
+#
+# With dry_run, publish is skipped. Every run shows the result in the job summary.
 
 on:
   schedule:
@@ -17,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Upstream release tag to sync, e.g. v1.9.6 (default: the latest stable release)'
+        description: 'Upstream release tag to sync, vX.Y.Z (default: the latest stable release)'
         required: false
         type: string
       dry_run:
@@ -33,46 +40,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Decides whether to run. Without the FORK_SYNC_TOKEN secret, scheduled runs
-  # skip quietly instead of failing every week, manual runs fail with a clear
-  # error, and dry runs go ahead (they do not need it).
-  gate:
-    if: github.repository_owner == 'qdrant'
-    runs-on: ubuntu-latest
-    outputs:
-      run: ${{ steps.gate.outputs.run }}
-    steps:
-      - id: gate
-        env:
-          FORK_SYNC_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
-          DRY_RUN: ${{ inputs.dry_run }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          if [ -n "$FORK_SYNC_TOKEN" ] || [ "$DRY_RUN" = true ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          elif [ "$EVENT" = schedule ]; then
-            echo "::notice title=Sync skipped::The FORK_SYNC_TOKEN secret is not available, see the README."
-          else
-            echo "::error title=FORK_SYNC_TOKEN is not available::No Actions secret named FORK_SYNC_TOKEN is readable by this run. It must be able to push branches, open pull requests and push changes under .github/workflows/. See the README."
-            exit 1
-          fi
-
   sync:
-    needs: gate
-    if: needs.gate.outputs.run == 'true'
+    if: github.repository_owner == 'qdrant'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read # for target --check-existing, which only reads public data
+    outputs:
+      branch: ${{ steps.merge.outputs.branch }}
+      status: ${{ steps.merge.outputs.status }}
     env:
-      GIT_AUTHOR_NAME: github-actions[bot]
-      GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
-      GIT_COMMITTER_NAME: github-actions[bot]
-      GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+      # The commits are the GitHub App's, which pushes them and opens the pull
+      # request (351653815 is its bot user's ID).
+      GIT_AUTHOR_NAME: qdrant-flux-fork-sync[bot]
+      GIT_AUTHOR_EMAIL: 351653815+qdrant-flux-fork-sync[bot]@users.noreply.github.com
+      GIT_COMMITTER_NAME: qdrant-flux-fork-sync[bot]
+      GIT_COMMITTER_EMAIL: 351653815+qdrant-flux-fork-sync[bot]@users.noreply.github.com
     steps:
-      # The credentials are not persisted: the adaptations run upstream's code
-      # (make tidy runs its Makefile), and nothing before the publish step can
-      # read the token.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,7 +71,6 @@ jobs:
           go-version-file: tools/fork-sync/go.mod
           cache: false
 
-      # Built before the merge, from the fork's own code.
       - name: Build fork-sync
         run: go -C tools/fork-sync build -o "$RUNNER_TEMP/fork-sync" .
 
@@ -107,14 +90,79 @@ jobs:
           TAG: ${{ steps.target.outputs.tag }}
           # setup-go pins the Go of tools/fork-sync; a release can need a newer one.
           GOTOOLCHAIN: auto
-        run: '"$RUNNER_TEMP/fork-sync" merge "$TAG" --body-file "$RUNNER_TEMP/pr-body.md" --summary-file "$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"'
+        run: |
+          mkdir -p "$RUNNER_TEMP/sync"
+          "$RUNNER_TEMP/fork-sync" merge "$TAG" --body-file "$RUNNER_TEMP/sync/pr-body.md" --summary-file "$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
 
-      - name: Push the branch and open the pull request
+      # The commits the sync made, and upstream's, without what the checkout
+      # already had.
+      - name: Bundle the sync branch
         if: inputs.dry_run != true && steps.merge.outcome == 'success'
         env:
-          # The only step that gets the token. It is not named BOT_GITHUB_TOKEN,
-          # as Flux names its own: the workflows that follow upstream must not be
-          # able to pick it up.
-          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
           BRANCH: ${{ steps.merge.outputs.branch }}
-        run: '"$RUNNER_TEMP/fork-sync" publish --branch "$BRANCH" --body-file "$RUNNER_TEMP/pr-body.md"'
+          BASE: ${{ steps.merge.outputs.base }}
+        run: git bundle create "$RUNNER_TEMP/sync/branch.bundle" "$BRANCH" "^$BASE"
+
+      - name: Upload the sync branch
+        if: inputs.dry_run != true && steps.merge.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sync
+          path: ${{ runner.temp }}/sync/
+          retention-days: 1
+
+  publish:
+    needs: sync
+    if: inputs.dry_run != true && needs.sync.outputs.status != ''
+    runs-on: ubuntu-latest
+    # Holds the GitHub App's credentials. Restricted to the default branch, so
+    # that workflows on pull request branches, including sync ones, cannot read
+    # them.
+    environment: fork-sync
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/fork-sync/go.mod
+          cache: false
+
+      - name: Build fork-sync
+        run: go -C tools/fork-sync build -o "$RUNNER_TEMP/fork-sync" .
+
+      - name: Download the sync branch
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sync
+          path: ${{ runner.temp }}/sync/
+
+      - name: Fetch the sync branch
+        env:
+          BRANCH: ${{ needs.sync.outputs.branch }}
+        run: git fetch --quiet "$RUNNER_TEMP/sync/branch.bundle" "$BRANCH:$BRANCH"
+
+      # A short-lived token for this repository, revoked when the job ends. Pull
+      # requests it opens trigger CI, unlike GITHUB_TOKEN's.
+      - name: Create a token for publishing
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.FORK_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.FORK_SYNC_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          # Syncs push upstream's commits, which change its workflows.
+          permission-workflows: write
+
+      - name: Push the branch and open the pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ needs.sync.outputs.branch }}
+        run: '"$RUNNER_TEMP/fork-sync" publish --branch "$BRANCH" --body-file "$RUNNER_TEMP/sync/pr-body.md"'

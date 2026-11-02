@@ -259,6 +259,32 @@ func TestMergeFromAPatchReleaseToTheNextMinor(t *testing.T) {
 	f.assertFile("crd.yaml", "group: cd.qdrant.io\nversion: v2\n")
 }
 
+// TestMergeKeepsOwnedRenamedCopies syncs a release that changes a file the fork
+// replaced with a renamed copy it owns. git's rename detection would apply the
+// change to the copy, but the fork's version is kept.
+func TestMergeKeepsOwnedRenamedCopies(t *testing.T) {
+	f := newFixture(t,
+		[]change{write(".github/workflows/ci.yaml", "upstream ci\nchanged upstream\n")},
+		[]change{remove(".github/workflows/ci.yaml"), write(".github/workflows/ci-copy.yaml", "upstream ci\n")},
+	)
+
+	res, err := f.syncer.Merge("v1.0.1")
+	require.NoError(t, err)
+
+	assert.Equal(t, StatusMerged, res.Status)
+	assert.Equal(t, "upstream ci\n", gittest.Read(t, f.fork, ".github/workflows/ci-copy.yaml"))
+	f.assertFile(".github/workflows/ci.yaml", absent)
+}
+
+func TestMergeRefusesAWorkingTreeWithChanges(t *testing.T) {
+	f := newFixture(t, []change{write("main.go", "package main // v1.0.1\n")}, nil)
+	gittest.Apply(t, f.fork, write("notes.txt", "a local file\n"))
+
+	_, err := f.syncer.Merge("v1.0.1")
+	require.ErrorContains(t, err, "the working tree has changes")
+	assert.Equal(t, "a local file\n", gittest.Read(t, f.fork, "notes.txt"))
+}
+
 func TestMergeStopsOnAFailingAdaptation(t *testing.T) {
 	f := newFixture(t, []change{write("main.go", "package main // v1.0.1\n")}, nil)
 	f.syncer.Config.Adaptations = append(f.syncer.Config.Adaptations, config.Adaptation{Name: "generate", Run: []string{"false"}})
@@ -290,6 +316,8 @@ func TestFindTarget(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidTag)
 	_, err = f.syncer.FindTarget("v9.9.9")
 	require.ErrorContains(t, err, "not found")
+	_, err = f.syncer.FindTarget("v1.0.0")
+	require.ErrorContains(t, err, "older than v1.0.1", "the fork only moves forward")
 }
 
 // fixture is an upstream repository and a fork of it, as described at the top

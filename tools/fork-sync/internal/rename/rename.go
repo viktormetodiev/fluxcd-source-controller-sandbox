@@ -113,12 +113,8 @@ func renameShortNames(renames []config.Replacement, content string) string {
 // selects, tracked or not (ignored files excepted), except the paths in
 // exclude.
 func Files(repo git.Repo, cfg config.Rename, exclude []string) ([]string, error) {
-	excludes := make([]string, len(exclude))
-	for i, p := range exclude {
-		excludes[i] = ":(exclude)" + p
-	}
 	lsFiles := []string{"ls-files", "-z", "--cached", "--others", "--exclude-standard", "--deduplicate", "--"}
-	return repo.Paths(slices.Concat(lsFiles, cfg.Files, excludes)...)
+	return repo.Paths(slices.Concat(lsFiles, cfg.Files, git.Exclude(exclude))...)
 }
 
 // writeIfChanged writes content to the file unless it already has it, and

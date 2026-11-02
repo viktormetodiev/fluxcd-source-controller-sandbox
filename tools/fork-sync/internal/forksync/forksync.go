@@ -129,7 +129,16 @@ func (s *Syncer) FindTarget(tag string) (Target, error) {
 // commits the merge and the adaptations to it. A merge with conflicts is not
 // an error: it is committed as it is and reported with StatusConflict.
 func (s *Syncer) Merge(tag string) (Result, error) {
-	err := s.fetchUpstreamTags()
+	// The sync stages everything and drops a failed adaptation's changes with
+	// git clean: in a working tree with changes, it would take or delete them.
+	status, err := s.Repo.Run("status", "--porcelain")
+	if err != nil {
+		return Result{}, err
+	}
+	if status != "" {
+		return Result{}, errors.New("the working tree has changes: commit or stash them first")
+	}
+	err = s.fetchUpstreamTags()
 	if err != nil {
 		return Result{}, err
 	}
@@ -202,17 +211,13 @@ func (s *Syncer) latestStableTag() (string, error) {
 }
 
 // lastSyncedTag returns the latest stable upstream release the fork has: the
-// one the last sync merged.
+// one the last sync merged, or "" if there is none.
 func (s *Syncer) lastSyncedTag() (string, error) {
 	out, err := s.Repo.Run("for-each-ref", "--merged", "HEAD", "--format=%(refname:strip=2)", upstreamRefs)
 	if err != nil {
 		return "", err
 	}
-	synced := latestStable(out)
-	if synced == "" {
-		return "", errors.New("the fork has no stable upstream release yet")
-	}
-	return synced, nil
+	return latestStable(out), nil
 }
 
 // latestStable returns the latest stable release among tags, or "" if there is
@@ -234,6 +239,15 @@ func (s *Syncer) checkTag(tag string) error {
 	if !s.Repo.Succeeds("rev-parse", "--verify", "--quiet", upstreamRefs+tag) {
 		return fmt.Errorf("upstream tag %q not found", tag)
 	}
+	// The fork only moves forward: merging an older release on top of a newer
+	// one would undo the newer one's changes where they conflict.
+	synced, err := s.lastSyncedTag()
+	if err != nil {
+		return err
+	}
+	if synced != "" && semver.Compare(tag, synced) < 0 {
+		return fmt.Errorf("upstream tag %s is older than %s, which the fork already has", tag, synced)
+	}
 	return nil
 }
 
@@ -248,12 +262,14 @@ func (s *Syncer) ownedChangedUpstream(head, ref string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	excludes := make([]string, len(s.Config.FollowUpstream))
-	for i, file := range s.Config.FollowUpstream {
-		excludes[i] = ":(exclude)" + file
-	}
 	diff := []string{"diff", "--name-only", "--no-renames", "-z", strings.TrimSpace(mergeBase), ref, "--"}
-	return s.Repo.Paths(slices.Concat(diff, s.Config.OwnedPaths, excludes)...)
+	return s.Repo.Paths(slices.Concat(diff, s.ownedPathspecs())...)
+}
+
+// ownedPathspecs returns pathspecs for the fork-owned paths, without the files
+// that follow upstream.
+func (s *Syncer) ownedPathspecs() []string {
+	return slices.Concat(s.Config.OwnedPaths, git.Exclude(s.Config.FollowUpstream))
 }
 
 // mergeUpstreamChanges merges ref without committing, with the fork-owned paths
@@ -270,6 +286,10 @@ func (s *Syncer) mergeUpstreamChanges(ref string, owned []string) ([]string, err
 	if err != nil {
 		return nil, err
 	}
+	err = s.keepOtherOwnedFiles(owned)
+	if err != nil {
+		return nil, err
+	}
 	conflicts, err := s.Repo.Paths("diff", "--name-only", "--diff-filter=U", "-z")
 	if err != nil {
 		return nil, err
@@ -278,6 +298,28 @@ func (s *Syncer) mergeUpstreamChanges(ref string, owned []string) ([]string, err
 		return nil, nil
 	}
 	return s.resolveConflicts(ref, conflicts)
+}
+
+// keepOtherOwnedFiles puts back the fork's version of the fork-owned files
+// that the merge changed although upstream did not change them (owned lists the
+// ones it did). git's rename detection does that: when the fork replaced an
+// upstream file with a renamed copy, such as a regenerated CRD, upstream's
+// changes to the original are applied to the copy.
+func (s *Syncer) keepOtherOwnedFiles(owned []string) error {
+	if len(s.Config.OwnedPaths) == 0 {
+		return nil
+	}
+	changed, err := s.Repo.Paths(slices.Concat([]string{"diff", "--name-only", "--no-renames", "-z", "HEAD", "--"}, s.ownedPathspecs())...)
+	if err != nil {
+		return err
+	}
+	var others []string
+	for _, file := range changed {
+		if !slices.Contains(owned, file) {
+			others = append(others, file)
+		}
+	}
+	return s.takePathsFrom("HEAD", others)
 }
 
 // resolveConflicts merges each conflicting file again, from the last upstream
@@ -294,6 +336,9 @@ func (s *Syncer) resolveConflicts(ref string, conflicts []string) ([]string, err
 	synced, err := s.lastSyncedTag()
 	if err != nil {
 		return nil, err
+	}
+	if synced == "" {
+		return conflicts, nil
 	}
 	renamedFiles, err := s.renamedFiles()
 	if err != nil {

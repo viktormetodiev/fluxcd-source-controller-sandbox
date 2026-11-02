@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
-
-	"github.com/qdrant/fluxcd-source-controller/tools/fork-sync/internal/forksync"
 )
 
 const (
@@ -29,9 +26,9 @@ workflow appends to $GITHUB_OUTPUT. The status is one of:
 
   needs-sync   the release is not in the fork yet
   up-to-date   the release is already merged
-  exists       with --check-existing: a sync branch or pull request for it is
-               already there, including a pull request closed without merging,
-               which is a decision not to take that release.
+  exists       with --check-existing: a pull request for it is already
+               there, including one closed without merging, which is a
+               decision not to take that release.
 
 --check-existing reads pull requests with the GH_TOKEN environment variable.`,
 	Args: cobra.NoArgs,
@@ -40,7 +37,7 @@ workflow appends to $GITHUB_OUTPUT. The status is one of:
 
 func init() {
 	targetCmd.Flags().StringVar(&targetOpts.tag, "tag", "", "upstream release to sync, vX.Y.Z (default: the latest stable release)")
-	targetCmd.Flags().BoolVar(&targetOpts.checkExisting, "check-existing", false, "report a release that already has a sync branch or pull request")
+	targetCmd.Flags().BoolVar(&targetOpts.checkExisting, "check-existing", false, "report a release that already has a pull request")
 	rootCmd.AddCommand(targetCmd)
 }
 
@@ -59,7 +56,11 @@ func runTarget(cmd *cobra.Command, _ []string) error {
 	case target.UpToDate:
 		status = statusUpToDate
 	case targetOpts.checkExisting:
-		exists, err := syncStarted(cmd.Context(), s, target.Branch())
+		client, err := newGitHubClient()
+		if err != nil {
+			return err
+		}
+		exists, err := client.PullRequestExists(cmd.Context(), target.Branch())
 		if err != nil {
 			return err
 		}
@@ -70,16 +71,4 @@ func runTarget(cmd *cobra.Command, _ []string) error {
 
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "tag=%s\nbranch=%s\nstatus=%s\n", target.Tag, target.Branch(), status)
 	return err
-}
-
-// syncStarted reports whether the sync branch is on origin or has a pull request.
-func syncStarted(ctx context.Context, s *forksync.Syncer, branch string) (bool, error) {
-	if s.Repo.Succeeds("ls-remote", "--exit-code", "--heads", "origin", branch) {
-		return true, nil
-	}
-	client, err := newGitHubClient()
-	if err != nil {
-		return false, err
-	}
-	return client.PullRequestExists(ctx, branch)
 }

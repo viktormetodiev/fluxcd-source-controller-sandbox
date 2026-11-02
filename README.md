@@ -37,7 +37,10 @@ fork owns, the API group rename and the commands that adapt upstream's code
 - With merge conflicts the PR is a draft, with the markers and a list of the
   conflicting files (`.sync-upstream-conflicts`) committed. The
   [`conflict-markers`](.github/workflows/conflict-markers.yaml) check fails until
-  the conflicts are resolved and that list is deleted.
+  the conflicts are resolved and that list is deleted. The rename and the
+  adaptations do not run on a conflicted sync: once the conflicts are resolved,
+  run `go -C tools/fork-sync run . --repo ../.. rename`, then the commands under
+  `adaptations` in `.github/fork-sync.yaml`.
 - If `make tidy` fails (say, the release needs a newer Go) the PR still opens,
   with a note.
 - Merge with a merge commit, never squash or rebase: the upstream tag has to stay
@@ -69,16 +72,24 @@ e2e and fuzz workflows and the Dependabot config, which need no secrets and
 nothing specific to Flux. A new upstream workflow shows up as removed in the
 adaptations commit; to take it, add it to `followUpstream`.
 
-**Token.** The workflow needs a `FORK_SYNC_TOKEN` secret (not `GITHUB_TOKEN`,
-whose PRs do not trigger CI) that can push branches, open PRs and change files
-under `.github/workflows/`. Without it, scheduled runs skip with a notice and
-manual runs fail with a clear error. Only the publish step receives it.
+**Credentials.** The workflow pushes and opens PRs as the
+[`qdrant-flux-fork-sync`](https://github.com/apps/qdrant-flux-fork-sync) app,
+installed only on the Flux forks (not `GITHUB_TOKEN`, whose PRs do not trigger CI
+and which cannot push the workflow changes that come with upstream's commits).
+Its client ID and private key are the `FORK_SYNC_APP_CLIENT_ID` and
+`FORK_SYNC_APP_PRIVATE_KEY` secrets of the `fork-sync` environment, restricted
+to `main`, so that workflows on PR branches, sync ones included, cannot read
+them. The workflow has two jobs: `sync` merges and runs upstream's code, with no
+credentials, and `publish` pushes and opens the PR from a fresh runner, with a
+token that lasts for the job.
 
 **Tests.** `go -C tools/fork-sync test ./...`, run in CI as `fork-tools-test`.
+[fluxcd-helm-controller](https://github.com/qdrant/fluxcd-helm-controller) has a
+copy of the tool: fixes go to both.
 
 #### Manual sync
 
-From an up-to-date `main` (needs `go` and `make`):
+From an up-to-date `main` with no local changes (needs `go` and `make`):
 
 ```sh
 go -C tools/fork-sync run . --repo ../.. merge vX.Y.Z

@@ -69,10 +69,15 @@ e2e and fuzz workflows and the Dependabot config, which need no secrets and
 nothing specific to Flux. A new upstream workflow shows up as removed in the
 adaptations commit; to take it, add it to `followUpstream`.
 
-**Token.** The workflow needs a `FORK_SYNC_TOKEN` secret (not `GITHUB_TOKEN`,
-whose PRs do not trigger CI) that can push branches, open PRs and change files
-under `.github/workflows/`. Without it, scheduled runs skip with a notice and
-manual runs fail with a clear error. Only the publish step receives it.
+**Credentials.** The workflow pushes and opens PRs as the
+[`qdrant-cloud-repo-automation`](https://github.com/apps/qdrant-cloud-repo-automation)
+app (not `GITHUB_TOKEN`, whose PRs do not trigger CI). It needs the app's client
+ID in the `REPO_AUTOMATION_APP_CLIENT_ID` variable and its private key in the
+`REPO_AUTOMATION_APP_PRIVATE_KEY` secret, and the app needs write access to
+contents, pull requests and workflows. Each run creates a short-lived token for
+this repository, and only the publish step receives it. Without the
+credentials, scheduled runs skip with a notice and manual runs fail with a clear
+error.
 
 **Tests.** `go -C tools/fork-sync test ./...`, run in CI as `fork-tools-test`.
 

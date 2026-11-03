@@ -45,7 +45,7 @@ concurrency:
 
 jobs:
   sync:
-    if: github.repository_owner == 'qdrant'
+    if: github.repository_owner == 'viktormetodiev'
     runs-on: ubuntu-latest
     permissions:
       contents: read

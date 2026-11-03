@@ -51,6 +51,17 @@ func PRBody(tmpl string, r Result, upstreamURL string) (string, error) {
 		b.WriteString(">\n> The rename and the adaptations did not run. Once the conflicts are resolved, run them as a clean sync would: " +
 			"`go -C tools/fork-sync run . --repo ../.. rename`, then each command under `adaptations` in `.github/fork-sync.yaml`.\n\n")
 	}
+	workflows := changedWorkflows(r.Restored)
+	if len(workflows) > 0 && r.Synced != "" {
+		fmt.Fprintf(&b, "> **Upstream changed workflows the fork keeps as its own:** `%s`. "+
+			"They are not taken automatically. If CI needs them (a newer Go, say), apply upstream's changes on this branch, "+
+			"leaving out the files you do not want:\n>\n"+
+			"> ```sh\n"+
+			"> git fetch --no-tags %s \"+refs/tags/*:refs/upstream-tags/*\"\n"+
+			"> git diff refs/upstream-tags/%s refs/upstream-tags/%s -- %s | git apply -3\n"+
+			"> ```\n\n",
+			strings.Join(workflows, "`, `"), upstreamURL, r.Synced, r.Tag, strings.Join(workflows, " "))
+	}
 	data := prBodyData{Tag: r.Tag, UpstreamURL: strings.TrimSuffix(upstreamURL, ".git")}
 	err = t.Execute(&b, data)
 	if err != nil {
@@ -64,6 +75,19 @@ func PRBody(tmpl string, r Result, upstreamURL string) (string, error) {
 func Summary(r Result, commits, prBody string) string {
 	return fmt.Sprintf("## Sync upstream %s\n\nMerge status: **%s**.\n\n```\n%s```\n\n### Pull request body\n\n%s",
 		r.Tag, r.Status, commits, prBody)
+}
+
+// changedWorkflows returns the workflows that upstream changed and the fork
+// has: the ones put back after the merge that exist on both sides (M).
+// Workflows the fork deleted are left out, as they would show up on most syncs.
+func changedWorkflows(restored []git.Change) []string {
+	var workflows []string
+	for _, c := range restored {
+		if c.Status == "M" && strings.HasPrefix(c.Path, workflowsDir) {
+			workflows = append(workflows, c.Path)
+		}
+	}
+	return workflows
 }
 
 func formatChanges(changes []git.Change) string {

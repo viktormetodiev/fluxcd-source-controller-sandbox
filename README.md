@@ -64,24 +64,31 @@ For example, v1.10 passes the manager to `events.NewRecorder` as an option
 (`events.WithManager(mgr)`) and renames the reconcilers' `EventRecorder` field
 to `Recorder`.
 
-**The fork owns `.github/`,** because workflows run with this repository's
-credentials. Upstream's changes there are put back to the fork's version in the
-adaptations commit (on conflicted syncs too), except for the files listed in
-`followUpstream` in [`.github/fork-sync.yaml`](.github/fork-sync.yaml): the test,
-e2e and fuzz workflows and the Dependabot config, which need no secrets and
-nothing specific to Flux. A new upstream workflow shows up as removed in the
-adaptations commit; to take it, add it to `followUpstream`.
+**The fork owns `.github/`,** because the sync PR's CI runs the workflows with
+this repository's secrets before anyone reviews it. Upstream's changes there are
+put back to the fork's version in the adaptations commit (on conflicted syncs
+too), and a sync stops if an adaptation changes a workflow.
+
+**Taking an upstream CI change.** When upstream changed workflows the fork
+has, the sync PR lists them with the command that applies upstream's changes on
+top of the fork's version. Run it on the sync branch when CI needs them (a newer
+Go, say), leaving out the files you do not want. By hand, between the last
+synced and the new release:
+
+```sh
+git fetch --no-tags https://github.com/fluxcd/source-controller.git "+refs/tags/*:refs/upstream-tags/*"
+git diff refs/upstream-tags/vOLD refs/upstream-tags/vNEW -- .github/workflows/test.yaml | git apply -3
+```
 
 **Credentials.** The workflow pushes and opens PRs as the
 [`qdrant-flux-fork-sync`](https://github.com/apps/qdrant-flux-fork-sync) app,
 installed only on the Flux forks (not `GITHUB_TOKEN`, whose PRs do not trigger CI
 and which cannot push the workflow changes that come with upstream's commits).
 Its client ID and private key are the `FORK_SYNC_APP_CLIENT_ID` and
-`FORK_SYNC_APP_PRIVATE_KEY` secrets of the `fork-sync` environment, restricted
-to `main`, so that workflows on PR branches, sync ones included, cannot read
-them. The workflow has two jobs: `sync` merges and runs upstream's code, with no
-credentials, and `publish` pushes and opens the PR from a fresh runner, with a
-token that lasts for the job.
+`FORK_SYNC_APP_PRIVATE_KEY` secrets. The workflow has two jobs, so that
+upstream's code never runs where they are: `sync` merges and runs upstream's
+code, with no credentials, and `publish` pushes and opens the PR from a fresh
+runner, with a token that lasts for the job.
 
 **Tests.** `go -C tools/fork-sync test ./...`, run in CI as `fork-tools-test`.
 [fluxcd-helm-controller](https://github.com/qdrant/fluxcd-helm-controller) has a

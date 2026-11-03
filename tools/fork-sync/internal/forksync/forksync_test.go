@@ -19,24 +19,22 @@ import (
 
 // The tests sync real git repositories: a small upstream and a fork of it.
 //
-// Upstream v1.0.0 has four files:
+// Upstream v1.0.0 has three files:
 //
-//	.github/workflows/ci.yaml     upstream ci
-//	.github/workflows/test.yaml   upstream test
-//	crd.yaml                      group: source.toolkit.fluxcd.io, version: v1
-//	main.go                       package main
+//	.github/workflows/ci.yaml   upstream ci
+//	crd.yaml                    group: source.toolkit.fluxcd.io, version: v1
+//	main.go                     package main
 //
 // The fork starts from v1.0.0. It has its own ci.yaml ("fork ci"), a workflow
 // of its own (fork.yaml), crd.yaml with the group renamed, and the sync
-// configuration below: it owns .github/, but test.yaml follows upstream. Each test makes upstream v1.0.1 out of v1.0.0 plus some
-// changes, sometimes changes the fork too, and then syncs v1.0.1.
+// configuration below: it owns .github/. Each test makes upstream v1.0.1 out of
+// v1.0.0 plus some changes, sometimes changes the fork too, and then syncs
+// v1.0.1.
 
 const syncConfig = `upstream: %s
 prBodyTemplate: pr-body.md
 ownedPaths:
   - .github/
-followUpstream:
-  - .github/workflows/test.yaml
 rename:
   files: ["*.yaml"]
   replace:
@@ -92,13 +90,6 @@ func TestMerge(t *testing.T) {
 			wantFiles:         map[string]string{".github/workflows/ci.yaml": "fork ci", ".github/workflows/fork.yaml": "fork only"},
 			wantInMergeCommit: map[string]string{".github/workflows/ci.yaml": "upstream ci v1.0.1"},
 			wantInMessage:     []string{"M\t.github/workflows/ci.yaml"},
-		},
-		{
-			name:        "upstream changes an owned file that follows upstream",
-			upstream:    []change{write(".github/workflows/test.yaml", "upstream test v1.0.1\n")},
-			wantStatus:  StatusMerged,
-			wantCommits: []string{mergeCommit},
-			wantFiles:   map[string]string{".github/workflows/test.yaml": "upstream test v1.0.1"},
 		},
 		{
 			name:              "upstream adds a file with its group name",
@@ -215,6 +206,7 @@ func TestMerge(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.wantStatus, res.Status)
+			assert.Equal(t, "v1.0.0", res.Synced, "the release the fork had")
 			assert.Equal(t, tt.wantConflicts, res.Conflicts)
 			assert.Equal(t, tt.wantCommits, f.commitSubjects())
 			assert.Empty(t, f.git("status", "--porcelain"), "everything is committed")
@@ -285,6 +277,15 @@ func TestMergeRefusesAWorkingTreeWithChanges(t *testing.T) {
 	assert.Equal(t, "a local file\n", gittest.Read(t, f.fork, "notes.txt"))
 }
 
+func TestMergeStopsOnAnAdaptationThatChangesWorkflows(t *testing.T) {
+	f := newFixture(t, []change{write("main.go", "package main // v1.0.1\n")},
+		[]change{write("Makefile", "tidy:\n\techo 'on: push' > .github/workflows/injected.yaml\n")})
+
+	_, err := f.syncer.Merge("v1.0.1")
+	require.ErrorContains(t, err, `the adaptation "make tidy" changed workflows`)
+	require.ErrorContains(t, err, ".github/workflows/injected.yaml")
+}
+
 func TestMergeStopsOnAFailingAdaptation(t *testing.T) {
 	f := newFixture(t, []change{write("main.go", "package main // v1.0.1\n")}, nil)
 	f.syncer.Config.Adaptations = append(f.syncer.Config.Adaptations, config.Adaptation{Name: "generate", Run: []string{"false"}})
@@ -335,7 +336,6 @@ func newFixture(t *testing.T, upstreamChanges, forkChanges []change) *fixture {
 	upstream := gittest.New(t)
 	gittest.Commit(t, upstream, "v1.0.0",
 		write(".github/workflows/ci.yaml", "upstream ci\n"),
-		write(".github/workflows/test.yaml", "upstream test\n"),
 		write("crd.yaml", "group: source.toolkit.fluxcd.io\nversion: v1\n"),
 		write("main.go", "package main\n"),
 	)

@@ -43,6 +43,10 @@ const (
 	ConflictsFile = ".sync-upstream-conflicts"
 	// BranchPrefix starts the name of every sync branch.
 	BranchPrefix = "sync/upstream-"
+	// workflowsDir holds the GitHub Actions workflows. The sync never changes
+	// them: the sync pull request's CI runs them with this repository's
+	// secrets, before anyone reviews it.
+	workflowsDir = ".github/workflows/"
 )
 
 // stableTag matches upstream's stable releases. Pre-releases and the tags of
@@ -87,7 +91,10 @@ type Result struct {
 	Tag    string
 	Branch string
 	// Base is the commit the sync branch starts from.
-	Base   string
+	Base string
+	// Synced is the latest upstream release the fork had before this sync, or
+	// "" if it had none.
+	Synced string
 	Status Status
 	// Conflicts are the conflicting files, for StatusConflict.
 	Conflicts []string
@@ -151,7 +158,11 @@ func (s *Syncer) Merge(tag string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{Tag: tag, Branch: BranchPrefix + tag, Base: strings.TrimSpace(base)}
+	synced, err := s.lastSyncedTag()
+	if err != nil {
+		return Result{}, err
+	}
+	res := Result{Tag: tag, Branch: BranchPrefix + tag, Base: strings.TrimSpace(base), Synced: synced}
 
 	owned, err := s.ownedChangedUpstream(res.Base, ref)
 	if err != nil {
@@ -163,7 +174,7 @@ func (s *Syncer) Merge(tag string) (Result, error) {
 		return Result{}, err
 	}
 
-	conflicts, err := s.mergeUpstreamChanges(ref, owned)
+	conflicts, err := s.mergeUpstreamChanges(ref, synced, owned)
 	if err != nil {
 		return Result{}, err
 	}
@@ -263,18 +274,13 @@ func (s *Syncer) ownedChangedUpstream(head, ref string) ([]string, error) {
 		return nil, err
 	}
 	diff := []string{"diff", "--name-only", "--no-renames", "-z", strings.TrimSpace(mergeBase), ref, "--"}
-	return s.Repo.Paths(slices.Concat(diff, s.ownedPathspecs())...)
-}
-
-// ownedPathspecs returns pathspecs for the fork-owned paths, without the files
-// that follow upstream.
-func (s *Syncer) ownedPathspecs() []string {
-	return slices.Concat(s.Config.OwnedPaths, git.Exclude(s.Config.FollowUpstream))
+	return s.Repo.Paths(slices.Concat(diff, s.Config.OwnedPaths)...)
 }
 
 // mergeUpstreamChanges merges ref without committing, with the fork-owned paths
-// set to upstream's version, and returns the files that still conflict.
-func (s *Syncer) mergeUpstreamChanges(ref string, owned []string) ([]string, error) {
+// set to upstream's version, and returns the files that still conflict. synced
+// is the last upstream release the fork has, or "" if it has none.
+func (s *Syncer) mergeUpstreamChanges(ref, synced string, owned []string) ([]string, error) {
 	_, mergeErr := s.Repo.Run("merge", "--no-ff", "--no-commit", ref) // fails on conflicts, which are handled below
 	if !s.Repo.Succeeds("rev-parse", "--quiet", "--verify", "MERGE_HEAD") {
 		if mergeErr == nil {
@@ -297,7 +303,7 @@ func (s *Syncer) mergeUpstreamChanges(ref string, owned []string) ([]string, err
 	if len(conflicts) == 0 {
 		return nil, nil
 	}
-	return s.resolveConflicts(ref, conflicts)
+	return s.resolveConflicts(ref, synced, conflicts)
 }
 
 // keepOtherOwnedFiles puts back the fork's version of the fork-owned files
@@ -309,7 +315,7 @@ func (s *Syncer) keepOtherOwnedFiles(owned []string) error {
 	if len(s.Config.OwnedPaths) == 0 {
 		return nil
 	}
-	changed, err := s.Repo.Paths(slices.Concat([]string{"diff", "--name-only", "--no-renames", "-z", "HEAD", "--"}, s.ownedPathspecs())...)
+	changed, err := s.Repo.Paths(slices.Concat([]string{"diff", "--name-only", "--no-renames", "-z", "HEAD", "--"}, s.Config.OwnedPaths)...)
 	if err != nil {
 		return err
 	}
@@ -332,11 +338,7 @@ func (s *Syncer) keepOtherOwnedFiles(owned []string) error {
 // v1.9.0, and every change the patches share with main conflicts. The rename is
 // applied to both upstream versions, so that upstream changes next to a renamed
 // line do not conflict either.
-func (s *Syncer) resolveConflicts(ref string, conflicts []string) ([]string, error) {
-	synced, err := s.lastSyncedTag()
-	if err != nil {
-		return nil, err
-	}
+func (s *Syncer) resolveConflicts(ref, synced string, conflicts []string) ([]string, error) {
 	if synced == "" {
 		return conflicts, nil
 	}
@@ -523,8 +525,16 @@ func (s *Syncer) commitAdaptations(res *Result, owned []string) error {
 func (s *Syncer) runAdaptation(adaptation config.Adaptation, res *Result) error {
 	runErr := s.run(adaptation)
 	if runErr == nil {
+		// Adaptations run upstream's code (make runs its Makefile).
+		changedWorkflows, err := s.Repo.Paths("ls-files", "--modified", "--deleted", "--others", "--exclude-standard", "-z", "--", workflowsDir)
+		if err != nil {
+			return err
+		}
+		if len(changedWorkflows) > 0 {
+			return fmt.Errorf("the adaptation %q changed workflows, which a sync never does: %s", adaptation.Name, strings.Join(changedWorkflows, ", "))
+		}
 		s.Logger.Info("Adaptation done", "adaptation", adaptation.Name)
-		_, err := s.Repo.Run("add", "--all")
+		_, err = s.Repo.Run("add", "--all")
 		return err
 	}
 	if !adaptation.AllowFailure {

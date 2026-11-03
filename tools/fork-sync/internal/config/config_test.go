@@ -21,7 +21,6 @@ func TestLoad(t *testing.T) {
 	cfg, err := load(t, `
 upstream: https://github.com/fluxcd/source-controller.git
 ownedPaths: [.github/]
-followUpstream: [.github/workflows/test.yaml]
 rename:
   files: ["*.go"]
   replace:
@@ -37,10 +36,9 @@ prBodyTemplate: .github/sync-upstream-pr-body.md
 `)
 	require.NoError(t, err)
 	assert.Equal(t, Config{
-		Upstream:       "https://github.com/fluxcd/source-controller.git",
-		BaseBranch:     "main",
-		OwnedPaths:     []string{".github/"},
-		FollowUpstream: []string{".github/workflows/test.yaml"},
+		Upstream:   "https://github.com/fluxcd/source-controller.git",
+		BaseBranch: "main",
+		OwnedPaths: []string{".github/"},
 		Rename: &Rename{
 			Files:      []string{"*.go"},
 			Replace:    []Replacement{{From: "source.toolkit.fluxcd.io", To: "cd.qdrant.io"}},

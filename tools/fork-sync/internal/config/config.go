@@ -21,11 +21,6 @@ type Config struct {
 	// OwnedPaths are git pathspecs (files or directories) that the fork owns:
 	// what upstream changes there is not taken.
 	OwnedPaths []string `mapstructure:"ownedPaths"`
-	// FollowUpstream are files under the owned paths that take upstream's
-	// changes like any other file: for example the CI workflows that need
-	// nothing that only upstream has (secrets, release infrastructure). Like
-	// the rest of the owned paths, they are not renamed.
-	FollowUpstream []string `mapstructure:"followUpstream"`
 	// Rename renames upstream's names in the fork's files. It runs after the
 	// merge, before the adaptations, and what it changes is committed with them.
 	// Nil when the fork renames nothing.

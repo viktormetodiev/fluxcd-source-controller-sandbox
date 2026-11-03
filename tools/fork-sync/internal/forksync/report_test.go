@@ -25,6 +25,25 @@ make tidy failed, so its changes are not included.`, msg)
 }
 
 func TestPRBody(t *testing.T) {
+	t.Run("upstream's changes to the fork's workflows come with the command to take them", func(t *testing.T) {
+		body, err := PRBody("TEMPLATE\n", Result{
+			Tag:    "v1.10.1",
+			Synced: "v1.9.3",
+			Restored: []git.Change{
+				{Status: "M", Path: ".github/workflows/test.yaml"},
+				{Status: "M", Path: ".github/workflows/e2e.yaml"},
+				{Status: "D", Path: ".github/workflows/scan.yaml"}, // deleted in the fork
+				{Status: "M", Path: ".github/labels.yaml"},         // not a workflow
+			},
+		}, "https://github.com/fluxcd/source-controller.git")
+		require.NoError(t, err)
+		assert.Contains(t, body, "`.github/workflows/test.yaml`, `.github/workflows/e2e.yaml`. They are not taken automatically.")
+		assert.Contains(t, body, "> git fetch --no-tags https://github.com/fluxcd/source-controller.git \"+refs/tags/*:refs/upstream-tags/*\"\n"+
+			"> git diff refs/upstream-tags/v1.9.3 refs/upstream-tags/v1.10.1 -- .github/workflows/test.yaml .github/workflows/e2e.yaml | git apply -3\n")
+		assert.NotContains(t, body, "scan.yaml")
+		assert.NotContains(t, body, "labels.yaml")
+	})
+
 	t.Run("a clean merge is just the template", func(t *testing.T) {
 		body, err := PRBody("Merges [{{ .Tag }}]({{ .UpstreamURL }}/releases/tag/{{ .Tag }}).\n", Result{Tag: "v1.9.6"},
 			"https://github.com/fluxcd/source-controller.git")

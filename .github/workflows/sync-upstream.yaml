@@ -13,7 +13,11 @@ name: sync-upstream
 #            a git bundle.
 #   publish  pushes that branch and opens the pull request, on a fresh runner,
 #            with tools/fork-sync built from the fork's own code. Only this job
-#            gets the GitHub App's credentials, from the fork-sync environment.
+#            gets the GitHub App's credentials.
+#
+# The sync never changes .github/workflows/ (the fork owns .github/), so the
+# sync pull request's CI runs the fork's workflows, which do not use the app's
+# credentials.
 #
 # With dry_run, publish is skipped. Every run shows the result in the job summary.
 
@@ -115,10 +119,6 @@ jobs:
     needs: sync
     if: inputs.dry_run != true && needs.sync.outputs.status != ''
     runs-on: ubuntu-latest
-    # Holds the GitHub App's credentials. Restricted to the default branch, so
-    # that workflows on pull request branches, including sync ones, cannot read
-    # them.
-    environment: fork-sync
     permissions:
       contents: read
     steps:

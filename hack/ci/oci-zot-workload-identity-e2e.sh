@@ -39,7 +39,7 @@ SPIRE_BROKER_ID="spiffe://${SPIRE_TRUST_DOMAIN}/spire/agent/k8s_psat/broker-clus
 SPIRE_OIDC_ISSUER="http://${CLUSTER}-control-plane:8082"
 JWT_SA_NAME="zot-puller-jwt"
 JWT_SA_NAME_B="zot-puller-jwt-b"
-JWT_OBJ_TYPE="ocirepositories.source.toolkit.fluxcd.io"
+JWT_OBJ_TYPE="ocirepositories.cd.qdrant.io"
 JWT_OCIREPO_A="zot-jwt-a"
 JWT_OCIREPO_B="zot-jwt-b"
 JWT_OCIREPO_A_CROSS="zot-jwt-a-cross"
@@ -419,7 +419,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "nodes", "nodes/proxy"]
     verbs: ["get", "list"]
-  - apiGroups: ["source.toolkit.fluxcd.io"]
+  - apiGroups: ["cd.qdrant.io"]
     resources: ["ocirepositories"]
     verbs: ["get", "list"]
   - apiGroups: ["image.toolkit.fluxcd.io"]
@@ -811,7 +811,7 @@ metadata:
 EOF
 
 kubectl -n "${APP_NS}" apply -f - >/dev/null <<EOF
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: ${OCIREPO_A}
@@ -826,7 +826,7 @@ spec:
   ref:
     tag: ${REV}
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: ${OCIREPO_B}
@@ -841,7 +841,7 @@ spec:
   ref:
     tag: ${REV}
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: ${OCIREPO_A}-cross
@@ -856,7 +856,7 @@ spec:
   ref:
     tag: ${REV}
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: ${OCIREPO_B}-cross
@@ -871,7 +871,7 @@ spec:
   ref:
     tag: ${REV}
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: ${OCIREPO_A}-wrong-audience
@@ -886,7 +886,7 @@ spec:
   ref:
     tag: ${REV}
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: ${JWT_OCIREPO_A}
@@ -901,7 +901,7 @@ spec:
   ref:
     tag: ${REV}
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: ${JWT_OCIREPO_B}
@@ -916,7 +916,7 @@ spec:
   ref:
     tag: ${REV}
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: ${JWT_OCIREPO_A_CROSS}

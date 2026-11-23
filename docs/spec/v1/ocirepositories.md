@@ -320,7 +320,7 @@ Example:
 
 ```yaml
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
+apiVersion: cd.qdrant.io/v1
 kind: OCIRepository
 metadata:
   name: app
@@ -1025,7 +1025,7 @@ LAST SEEN   TYPE     REASON                OBJECT                               
 When `.status.artifact.metadata` contains a non-empty
 `org.opencontainers.image.revision` annotation, the controller forwards its
 value in `NewArtifact` and recovery `Succeeded` Events using the
-`source.toolkit.fluxcd.io/originRevision` annotation. The
+`cd.qdrant.io/originRevision` annotation. The
 notification-controller exposes this value as `originRevision` in the Event
 metadata sent to notification consumers.
 

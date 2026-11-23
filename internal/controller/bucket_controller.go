@@ -32,9 +32,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	kuberecorder "k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,7 +41,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
+	cryptov1 "github.com/fluxcd/pkg/apis/crypto/v1"
+	eventv1 "github.com/fluxcd/pkg/apis/event/v1"
 	"github.com/fluxcd/pkg/apis/meta"
 	intdigest "github.com/fluxcd/pkg/artifact/digest"
 	"github.com/fluxcd/pkg/artifact/storage"
@@ -51,12 +50,14 @@ import (
 	"github.com/fluxcd/pkg/cache"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	helper "github.com/fluxcd/pkg/runtime/controller"
+	"github.com/fluxcd/pkg/runtime/events"
 	"github.com/fluxcd/pkg/runtime/jitter"
 	"github.com/fluxcd/pkg/runtime/patch"
 	"github.com/fluxcd/pkg/runtime/predicates"
 	rreconcile "github.com/fluxcd/pkg/runtime/reconcile"
 	"github.com/fluxcd/pkg/runtime/secrets"
 	"github.com/fluxcd/pkg/sourceignore"
+	fluxbroker "github.com/fluxcd/pkg/spiffe/broker"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	"github.com/fluxcd/source-controller/internal/bucket/azure"
@@ -126,13 +127,16 @@ var bucketFailConditions = []string{
 // BucketReconciler reconciles a v1.Bucket object.
 type BucketReconciler struct {
 	client.Client
-	kuberecorder.EventRecorder
+	events.Recorder
 	helper.Metrics
 
 	Storage        *storage.Storage
 	ControllerName string
 	TokenCache     *cache.TokenCache
 	LeaderElection *bool
+
+	DefaultServiceAccount string
+	SPIFFEBroker          fluxbroker.Interface
 
 	patchOptions []patch.Option
 }
@@ -209,7 +213,7 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	// Always attempt to patch the object and status after each reconciliation
 	// NOTE: The final runtime result and error are set in this block.
 	defer func() {
-		summarizeHelper := summarize.NewHelper(r.EventRecorder, serialPatcher)
+		summarizeHelper := summarize.NewHelper(r.Recorder, serialPatcher)
 		summarizeOpts := []summarize.Option{
 			summarize.WithConditions(bucketReadyCondition),
 			summarize.WithReconcileResult(recResult),
@@ -348,15 +352,16 @@ func (r *BucketReconciler) notify(ctx context.Context, oldObj, newObj *sourcev1.
 
 		message := fmt.Sprintf("stored artifact with %d fetched files from '%s' bucket", index.Len(), newObj.Spec.BucketName)
 
+		action := sourcev1.ActionReconcile
 		// Notify on new artifact and failure recovery.
 		if !oldObj.GetArtifact().HasDigest(newObj.GetArtifact().Digest) {
-			r.AnnotatedEventf(newObj, annotations, corev1.EventTypeNormal,
-				"NewArtifact", "%s", message)
+			r.AnnotatedEventf(newObj, nil, annotations, corev1.EventTypeNormal,
+				sourcev1.NewArtifactReason, action.String(), "%s", message)
 			ctrl.LoggerFrom(ctx).Info(message)
 		} else {
 			if sreconcile.FailureRecovery(oldObj, newObj, bucketFailConditions) {
-				r.AnnotatedEventf(newObj, annotations, corev1.EventTypeNormal,
-					meta.SucceededReason, "%s", message)
+				r.AnnotatedEventf(newObj, nil, annotations, corev1.EventTypeNormal,
+					meta.SucceededReason, action.String(), "%s", message)
 				ctrl.LoggerFrom(ctx).Info(message)
 			}
 		}
@@ -390,7 +395,7 @@ func (r *BucketReconciler) reconcileStorage(ctx context.Context, sp *patch.Seria
 		// matches the actual artifact
 		if !artifactMissing {
 			if err := r.Storage.VerifyArtifact(*artifact); err != nil {
-				r.Eventf(obj, corev1.EventTypeWarning, "ArtifactVerificationFailed", "failed to verify integrity of artifact: %s", err.Error())
+				r.Eventf(obj, nil, corev1.EventTypeWarning, sourcev1.ArtifactVerificationFailedReason, sourcev1.ActionReconcileStorage.String(), "failed to verify integrity of artifact: %s", err.Error())
 
 				if err = r.Storage.Remove(*artifact); err != nil {
 					return sreconcile.ResultEmpty, fmt.Errorf("failed to remove artifact after digest mismatch: %w", err)
@@ -435,18 +440,6 @@ func (r *BucketReconciler) reconcileStorage(ctx context.Context, sp *patch.Seria
 // the provider. If this fails, it records v1.FetchFailedCondition=True on
 // the object and returns early.
 func (r *BucketReconciler) reconcileSource(ctx context.Context, sp *patch.SerialPatcher, obj *sourcev1.Bucket, index *index.Digester, dir string) (sreconcile.Result, error) {
-	usesObjectLevelWorkloadIdentity := obj.Spec.Provider != "" && obj.Spec.Provider != sourcev1.BucketProviderGeneric && obj.Spec.ServiceAccountName != ""
-	if usesObjectLevelWorkloadIdentity {
-		if !auth.IsObjectLevelWorkloadIdentityEnabled() {
-			const gate = auth.FeatureGateObjectLevelWorkloadIdentity
-			const msgFmt = "to use spec.serviceAccountName for provider authentication please enable the %s feature gate in the controller"
-			err := fmt.Errorf(msgFmt, gate)
-			e := serror.NewStalling(err, meta.FeatureGateDisabledReason)
-			conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, "%s", e)
-			return sreconcile.ResultEmpty, e
-		}
-	}
-
 	creds, err := r.setupCredentials(ctx, obj)
 	if err != nil {
 		e := serror.NewGeneric(err, sourcev1.AuthenticationFailedReason)
@@ -527,7 +520,7 @@ func (r *BucketReconciler) reconcileArtifact(ctx context.Context, sp *patch.Seri
 	if curArtifact := obj.GetArtifact(); curArtifact != nil && curArtifact.Revision != "" {
 		curRev := digest.Digest(curArtifact.Revision)
 		if curRev.Validate() == nil && index.Digest(curRev.Algorithm()) == curRev {
-			r.eventLogf(ctx, obj, eventv1.EventTypeTrace, sourcev1.ArtifactUpToDateReason, "artifact up-to-date with remote revision: '%s'", artifact.Revision)
+			sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.ArtifactUpToDateReason, sourcev1.ActionReconcileArtifact, "artifact up-to-date with remote revision: '%s'", artifact.Revision)
 			return sreconcile.ResultSuccess, nil
 		}
 	}
@@ -584,7 +577,7 @@ func (r *BucketReconciler) reconcileArtifact(ctx context.Context, sp *patch.Seri
 	// Update symlink on a "best effort" basis
 	url, err := r.Storage.Symlink(artifact, "latest.tar.gz")
 	if err != nil {
-		r.eventLogf(ctx, obj, eventv1.EventTypeTrace, sourcev1.SymlinkUpdateFailedReason,
+		sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.SymlinkUpdateFailedReason, sourcev1.ActionReconcileArtifact,
 			"failed to update status URL symlink: %s", err)
 	}
 	if url != "" {
@@ -628,7 +621,7 @@ func (r *BucketReconciler) garbageCollect(ctx context.Context, obj *sourcev1.Buc
 				"GarbageCollectionFailed",
 			)
 		} else if deleted != "" {
-			r.eventLogf(ctx, obj, eventv1.EventTypeTrace, "GarbageCollectionSucceeded",
+			sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.GarbageCollectionSucceededReason, sourcev1.ActionFinalize,
 				"garbage collected artifacts for deleted resource")
 		}
 		obj.Status.Artifact = nil
@@ -643,38 +636,12 @@ func (r *BucketReconciler) garbageCollect(ctx context.Context, obj *sourcev1.Buc
 			)
 		}
 		if len(delFiles) > 0 {
-			r.eventLogf(ctx, obj, eventv1.EventTypeTrace, "GarbageCollectionSucceeded",
+			sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.GarbageCollectionSucceededReason, sourcev1.ActionGarbageCollect,
 				"garbage collected %d artifacts", len(delFiles))
 			return nil
 		}
 	}
 	return nil
-}
-
-// eventLogf records events, and logs at the same time.
-//
-// This log is different from the debug log in the EventRecorder, in the sense
-// that this is a simple log. While the debug log contains complete details
-// about the event.
-func (r *BucketReconciler) eventLogf(ctx context.Context, obj runtime.Object, eventType string, reason string, messageFmt string, args ...interface{}) {
-	r.annotatedEventLogf(ctx, obj, nil, eventType, reason, messageFmt, args...)
-}
-
-// annotatedEventLogf records annotated events, and logs at the same time.
-//
-// This log is different from the debug log in the EventRecorder, in the sense
-// that this is a simple log. While the debug log contains complete details
-// about the event.
-func (r *BucketReconciler) annotatedEventLogf(ctx context.Context,
-	obj runtime.Object, annotations map[string]string, eventType string, reason string, messageFmt string, args ...interface{}) {
-	msg := fmt.Sprintf(messageFmt, args...)
-	// Log and emit event.
-	if eventType == corev1.EventTypeWarning {
-		ctrl.LoggerFrom(ctx).Error(errors.New(reason), msg)
-	} else {
-		ctrl.LoggerFrom(ctx).Info(msg)
-	}
-	r.AnnotatedEventf(obj, annotations, eventType, reason, "%s", msg)
 }
 
 // fetchEtagIndex fetches the current etagIndex for the in the obj specified
@@ -688,7 +655,7 @@ func fetchEtagIndex(ctx context.Context, provider BucketProvider, obj *sourcev1.
 	// Confirm bucket exists
 	exists, err := provider.BucketExists(ctxTimeout, obj.Spec.BucketName)
 	if err != nil {
-		return fmt.Errorf("failed to confirm existence of '%s' bucket: %w", obj.Spec.BucketName, err)
+		return fmt.Errorf("failed to confirm existence of '%s' bucket: %w", obj.Spec.BucketName, serror.SanitizeError(err))
 	}
 	if !exists {
 		err = fmt.Errorf("bucket '%s' not found", obj.Spec.BucketName)
@@ -726,7 +693,7 @@ func fetchEtagIndex(ctx context.Context, provider BucketProvider, obj *sourcev1.
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("indexation of objects from bucket '%s' failed: %w", obj.Spec.BucketName, err)
+		return fmt.Errorf("indexation of objects from bucket '%s' failed: %w", obj.Spec.BucketName, serror.SanitizeError(err))
 	}
 	return nil
 }
@@ -753,7 +720,12 @@ func fetchIndexFiles(ctx context.Context, provider BucketProvider, obj *sourcev1
 			if err := sem.Acquire(groupCtx, 1); err != nil {
 				return err
 			}
-			group.Go(func() error {
+			group.Go(func() (err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("failed to get '%s' object: %v", k, r)
+					}
+				}()
 				defer sem.Release(1)
 				localPath, err := securejoin.SecureJoin(tempDir, k)
 				if err != nil {
@@ -862,35 +834,79 @@ func (r *BucketReconciler) setupCredentials(ctx context.Context, obj *sourcev1.B
 // createBucketProvider creates a provider-specific bucket client using the given credentials and configuration.
 // It handles different bucket providers (AWS, GCP, Azure, generic) and returns the appropriate client.
 func (r *BucketReconciler) createBucketProvider(ctx context.Context, obj *sourcev1.Bucket, creds *bucketCredentials) (BucketProvider, error) {
-	authOpts := []auth.Option{
-		auth.WithClient(r.Client),
-		auth.WithServiceAccountNamespace(obj.GetNamespace()),
+	// Determine the cryptov1 service provider and resolve the ServiceAccount
+	// once, applying the default ServiceAccount when the object does not
+	// specify one. The generic provider does not support a ServiceAccount.
+	var serviceProvider string
+	switch obj.Spec.Provider {
+	case sourcev1.BucketProviderAmazon:
+		serviceProvider = cryptov1.ProviderAWS
+	case sourcev1.BucketProviderGoogle:
+		serviceProvider = cryptov1.ProviderGCP
+	case sourcev1.BucketProviderAzure:
+		serviceProvider = cryptov1.ProviderAzure
 	}
 
-	if obj.Spec.ServiceAccountName != "" {
-		authOpts = append(authOpts, auth.WithServiceAccountName(obj.Spec.ServiceAccountName))
-	}
-
-	if r.TokenCache != nil {
-		involvedObject := cache.InvolvedObject{
-			Kind:      sourcev1.BucketKind,
-			Name:      obj.GetName(),
-			Namespace: obj.GetNamespace(),
-			Operation: cache.OperationReconcile,
+	var sa *corev1.ServiceAccount
+	if serviceProvider != "" {
+		saName := obj.Spec.ServiceAccountName
+		if saName == "" {
+			saName = r.DefaultServiceAccount
 		}
-		authOpts = append(authOpts, auth.WithCache(*r.TokenCache, involvedObject))
+		if saName != "" {
+			sa = &corev1.ServiceAccount{}
+			saRef := client.ObjectKey{Namespace: obj.GetNamespace(), Name: saName}
+			if err := r.Get(ctx, saRef, sa); err != nil {
+				return nil, fmt.Errorf("failed to get service account '%s': %w", saRef, err)
+			}
+		}
 	}
 
+	var cryptoSpec *cryptov1.Spec
+	if sa != nil {
+		buildOpts := []cryptov1.Option{
+			cryptov1.WithAnnotations(sa.Annotations),
+			cryptov1.WithServiceProvider(serviceProvider),
+		}
+		if sts := obj.Spec.STS; sts != nil {
+			buildOpts = append(buildOpts, cryptov1.WithSTSEndpoint(sts.Provider, sts.Endpoint))
+		}
+		if obj.Spec.CertSecretRef != nil ||
+			(obj.Spec.STS != nil && obj.Spec.STS.CertSecretRef != nil) {
+			buildOpts = append(buildOpts, cryptov1.WithCertSecretRef())
+		}
+		var err error
+		cryptoSpec, err = cryptov1.BuildSpec(buildOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build spec for service account '%s/%s': %w",
+				sa.Namespace, sa.Name, err)
+		}
+	}
+
+	var authOpts []auth.Option
+	if cryptoSpec != nil {
+		authOpts = auth.OptionsFromSpec(cryptoSpec.Auth)
+	}
+	authOpts = append(authOpts,
+		auth.WithClient(r.Client),
+		auth.WithObject(sourcev1.GroupVersion.Group, sourcev1.BucketKind, obj),
+		auth.WithSPIFFEBroker(r.SPIFFEBroker))
+	if sa != nil {
+		authOpts = append(authOpts, auth.WithServiceAccountName(sa.Name))
+	}
+	if r.TokenCache != nil {
+		authOpts = append(authOpts,
+			auth.WithCache(*r.TokenCache),
+			auth.WithCacheOperation(cache.OperationReconcile))
+	}
 	if creds.proxyURL != nil {
 		authOpts = append(authOpts, auth.WithProxyURL(*creds.proxyURL))
 	}
-
 	if obj.Spec.Region != "" {
-		authOpts = append(authOpts, auth.WithSTSRegion(obj.Spec.Region))
+		authOpts = append(authOpts, auth.WithAWSRegion(obj.Spec.Region))
 	}
-
 	if sts := obj.Spec.STS; sts != nil {
-		authOpts = append(authOpts, auth.WithSTSEndpoint(sts.Endpoint))
+		authOpts = append(authOpts, auth.WithAWSSTSEndpoint(sts.Endpoint))
 	}
 
 	switch obj.Spec.Provider {

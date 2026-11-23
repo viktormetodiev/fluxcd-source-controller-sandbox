@@ -28,6 +28,8 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	helmchart "helm.sh/helm/v4/pkg/chart/v2"
 	helmgetter "helm.sh/helm/v4/pkg/getter"
 	"helm.sh/helm/v4/pkg/registry"
@@ -39,6 +41,10 @@ import (
 
 type mockTagsGetter struct {
 	tags map[string][]string
+}
+
+func (m *mockTagsGetter) Resolve(ref string) (ocispec.Descriptor, error) {
+	return ocispec.Descriptor{Digest: digest.FromString(ref)}, nil
 }
 
 func (m *mockTagsGetter) Tags(requestURL string) ([]string, error) {
@@ -279,6 +285,20 @@ func TestDependencyManager_build(t *testing.T) {
 			g.Expect(err).ToNot(HaveOccurred())
 		})
 	}
+}
+
+func TestDependencyManager_build_PanicRecovery(t *testing.T) {
+	g := NewWithT(t)
+
+	dm := NewDependencyManager(WithDownloaderCallback(func(url string) (repository.Downloader, error) {
+		panic("downloader callback error")
+	}))
+	err := dm.build(context.TODO(), LocalReference{}, &helmchart.Chart{}, map[string]*helmchart.Dependency{
+		"example": {Repository: "https://example.com"},
+	})
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("failed to add dependency 'example'"))
+	g.Expect(err.Error()).To(ContainSubstring("downloader callback error"))
 }
 
 func TestDependencyManager_addLocalDependency(t *testing.T) {

@@ -29,8 +29,6 @@ import (
 	helmgetter "helm.sh/helm/v4/pkg/getter"
 	helmreg "helm.sh/helm/v4/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	kuberecorder "k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,12 +37,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
+	eventv1 "github.com/fluxcd/pkg/apis/event/v1"
 	"github.com/fluxcd/pkg/apis/meta"
 	intdigest "github.com/fluxcd/pkg/artifact/digest"
 	"github.com/fluxcd/pkg/artifact/storage"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	helper "github.com/fluxcd/pkg/runtime/controller"
+	"github.com/fluxcd/pkg/runtime/events"
 	"github.com/fluxcd/pkg/runtime/jitter"
 	"github.com/fluxcd/pkg/runtime/patch"
 	"github.com/fluxcd/pkg/runtime/predicates"
@@ -105,7 +104,7 @@ var helmRepositoryFailConditions = []string{
 // HelmRepositoryReconciler reconciles a v1.HelmRepository object.
 type HelmRepositoryReconciler struct {
 	client.Client
-	kuberecorder.EventRecorder
+	events.Recorder
 	helper.Metrics
 
 	Getters        helmgetter.Providers
@@ -172,7 +171,7 @@ func (r *HelmRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Always attempt to patch the object after each reconciliation.
 	// NOTE: The final runtime result and error are set in this block.
 	defer func() {
-		summarizeHelper := summarize.NewHelper(r.EventRecorder, serialPatcher)
+		summarizeHelper := summarize.NewHelper(r.Recorder, serialPatcher)
 		summarizeOpts := []summarize.Option{
 			summarize.WithConditions(helmRepositoryReadyCondition),
 			summarize.WithReconcileResult(recResult),
@@ -301,13 +300,13 @@ func (r *HelmRepositoryReconciler) notify(ctx context.Context, oldObj, newObj *s
 
 		// Notify on new artifact and failure recovery.
 		if !oldObj.GetArtifact().HasDigest(newObj.GetArtifact().Digest) {
-			r.AnnotatedEventf(newObj, annotations, corev1.EventTypeNormal,
-				"NewArtifact", "%s", message)
+			r.AnnotatedEventf(newObj, nil, annotations, corev1.EventTypeNormal,
+				sourcev1.NewArtifactReason, sourcev1.ActionReconcile.String(), "%s", message)
 			ctrl.LoggerFrom(ctx).Info(message)
 		} else {
 			if sreconcile.FailureRecovery(oldObj, newObj, helmRepositoryFailConditions) {
-				r.AnnotatedEventf(newObj, annotations, corev1.EventTypeNormal,
-					meta.SucceededReason, "%s", message)
+				r.AnnotatedEventf(newObj, nil, annotations, corev1.EventTypeNormal,
+					meta.SucceededReason, sourcev1.ActionReconcile.String(), "%s", message)
 				ctrl.LoggerFrom(ctx).Info(message)
 			}
 		}
@@ -342,7 +341,7 @@ func (r *HelmRepositoryReconciler) reconcileStorage(ctx context.Context, sp *pat
 		// matches the actual artifact
 		if !artifactMissing {
 			if err := r.Storage.VerifyArtifact(*artifact); err != nil {
-				r.Eventf(obj, corev1.EventTypeWarning, "ArtifactVerificationFailed", "failed to verify integrity of artifact: %s", err.Error())
+				r.Eventf(obj, nil, corev1.EventTypeWarning, sourcev1.ArtifactVerificationFailedReason, sourcev1.ActionReconcileStorage.String(), "failed to verify integrity of artifact: %s", err.Error())
 
 				if err = r.Storage.Remove(*artifact); err != nil {
 					return sreconcile.ResultEmpty, fmt.Errorf("failed to remove artifact after digest mismatch: %w", err)
@@ -354,6 +353,9 @@ func (r *HelmRepositoryReconciler) reconcileStorage(ctx context.Context, sp *pat
 
 		// If the artifact is missing, remove it from the object
 		if artifactMissing {
+			if r.Cache != nil {
+				r.Cache.Delete(artifact.Path)
+			}
 			obj.Status.Artifact = nil
 			obj.Status.URL = ""
 		}
@@ -390,7 +392,7 @@ func (r *HelmRepositoryReconciler) reconcileStorage(ctx context.Context, sp *pat
 // v1.FetchFailedCondition is removed, and the repository.ChartRepository
 // pointer is set to the newly fetched index.
 func (r *HelmRepositoryReconciler) reconcileSource(ctx context.Context, sp *patch.SerialPatcher,
-	obj *sourcev1.HelmRepository, artifact *meta.Artifact, chartRepo *repository.ChartRepository) (sreconcile.Result, error) {
+	obj *sourcev1.HelmRepository, artifact *meta.Artifact, chartRepo *repository.ChartRepository) (_ sreconcile.Result, retErr error) {
 	// Ensure it's not an OCI URL. API validation ensures that only
 	// http/https/oci scheme are allowed.
 	if helmreg.IsOCI(obj.Spec.URL) {
@@ -461,6 +463,16 @@ func (r *HelmRepositoryReconciler) reconcileSource(ctx context.Context, sp *patc
 	}
 	*chartRepo = *newChartRepo
 
+	// reconcileArtifact removes the cached index on success. On error the
+	// deferred cleanup below removes it, covering error paths added later.
+	defer func() {
+		if retErr != nil {
+			if err := chartRepo.Clear(); err != nil {
+				ctrl.LoggerFrom(ctx).Error(err, "failed to remove temporary cached index file")
+			}
+		}
+	}()
+
 	// Early comparison to current Artifact.
 	if curArtifact := obj.GetArtifact(); curArtifact != nil {
 		curRev := digest.Digest(curArtifact.Revision)
@@ -478,7 +490,7 @@ func (r *HelmRepositoryReconciler) reconcileSource(ctx context.Context, sp *patc
 	// Load the cached repository index to ensure it passes validation.
 	if err := chartRepo.LoadFromPath(); err != nil {
 		e := serror.NewGeneric(
-			fmt.Errorf("failed to load Helm repository from index YAML: %w", err),
+			fmt.Errorf("failed to load Helm repository from index YAML at %s: %w", redactURL(obj.Spec.URL), err),
 			sourcev1.IndexationFailedReason,
 		)
 		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, "%s", e)
@@ -491,7 +503,7 @@ func (r *HelmRepositoryReconciler) reconcileSource(ctx context.Context, sp *patc
 	revision := chartRepo.Digest(intdigest.Canonical)
 	if revision.Validate() != nil {
 		e := serror.NewGeneric(
-			fmt.Errorf("failed to calculate revision: %w", err),
+			fmt.Errorf("failed to calculate revision: invalid digest '%s'", revision),
 			sourcev1.IndexationFailedReason,
 		)
 		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, "%s", e)
@@ -546,7 +558,7 @@ func (r *HelmRepositoryReconciler) reconcileArtifact(ctx context.Context, sp *pa
 			r.Cache.SetExpiration(artifact.Path, r.TTL)
 		}
 
-		r.eventLogf(ctx, obj, eventv1.EventTypeTrace, sourcev1.ArtifactUpToDateReason, "artifact up-to-date with remote revision: '%s'", artifact.Revision)
+		sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.ArtifactUpToDateReason, sourcev1.ActionReconcileArtifact, "artifact up-to-date with remote revision: '%s'", artifact.Revision)
 		return sreconcile.ResultSuccess, nil
 	}
 
@@ -589,6 +601,15 @@ func (r *HelmRepositoryReconciler) reconcileArtifact(ctx context.Context, sp *pa
 		return sreconcile.ResultEmpty, e
 	}
 
+	// Evict the index of the previous revision from the cache, as it is
+	// no longer referenced by the object and would otherwise occupy a
+	// cache slot until its TTL expires.
+	if r.Cache != nil {
+		if prev := obj.GetArtifact(); prev != nil && prev.Path != artifact.Path {
+			r.Cache.Delete(prev.Path)
+		}
+	}
+
 	// Record it on the object.
 	obj.Status.Artifact = artifact.DeepCopy()
 
@@ -599,14 +620,14 @@ func (r *HelmRepositoryReconciler) reconcileArtifact(ctx context.Context, sp *pa
 		// authentication. Using the Artifact.Path is safe as the path is in
 		// the format of: /<repository-name>/<chart-name>/<filename>.
 		if err := r.Cache.Set(artifact.Path, chartRepo.Index, r.TTL); err != nil {
-			r.eventLogf(ctx, obj, eventv1.EventTypeTrace, sourcev1.CacheOperationFailedReason, "failed to cache index: %s", err)
+			sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.CacheOperationFailedReason, sourcev1.ActionReconcileArtifact, "failed to cache index: %s", err)
 		}
 	}
 
 	// Update index symlink.
 	indexURL, err := r.Storage.Symlink(*artifact, "index.yaml")
 	if err != nil {
-		r.eventLogf(ctx, obj, eventv1.EventTypeTrace, sourcev1.SymlinkUpdateFailedReason,
+		sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.SymlinkUpdateFailedReason, sourcev1.ActionReconcileArtifact,
 			"failed to update status URL symlink: %s", err)
 	}
 	if indexURL != "" {
@@ -655,8 +676,12 @@ func (r *HelmRepositoryReconciler) garbageCollect(ctx context.Context, obj *sour
 				"GarbageCollectionFailed",
 			)
 		} else if deleted != "" {
-			r.eventLogf(ctx, obj, eventv1.EventTypeTrace, "GarbageCollectionSucceeded",
+			sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.GarbageCollectionSucceededReason, sourcev1.ActionFinalize,
 				"garbage collected artifacts for deleted resource")
+		}
+		// Evict the index from the cache.
+		if r.Cache != nil && obj.GetArtifact() != nil {
+			r.Cache.Delete(obj.GetArtifact().Path)
 		}
 		// Clean status sub-resource
 		obj.Status.Artifact = nil
@@ -674,28 +699,12 @@ func (r *HelmRepositoryReconciler) garbageCollect(ctx context.Context, obj *sour
 			)
 		}
 		if len(delFiles) > 0 {
-			r.eventLogf(ctx, obj, eventv1.EventTypeTrace, "GarbageCollectionSucceeded",
+			sreconcile.EventLogf(ctx, r, obj, eventv1.EventTypeTrace, sourcev1.GarbageCollectionSucceededReason, sourcev1.ActionGarbageCollect,
 				"garbage collected %d artifacts", len(delFiles))
 			return nil
 		}
 	}
 	return nil
-}
-
-// eventLogf records events, and logs at the same time.
-//
-// This log is different from the debug log in the EventRecorder, in the sense
-// that this is a simple log. While the debug log contains complete details
-// about the event.
-func (r *HelmRepositoryReconciler) eventLogf(ctx context.Context, obj runtime.Object, eventType string, reason string, messageFmt string, args ...interface{}) {
-	msg := fmt.Sprintf(messageFmt, args...)
-	// Log and emit event.
-	if eventType == corev1.EventTypeWarning {
-		ctrl.LoggerFrom(ctx).Error(errors.New(reason), msg)
-	} else {
-		ctrl.LoggerFrom(ctx).Info(msg)
-	}
-	r.Eventf(obj, eventType, reason, "%s", msg)
 }
 
 // migrateToStatic is HelmRepository OCI migration to static object.
@@ -724,4 +733,14 @@ func (r *HelmRepositoryReconciler) migrationToStatic(ctx context.Context, sp *pa
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// redactURL returns the given URL with the password of its user info
+// replaced, so it can be added to conditions and events.
+func redactURL(repoURL string) string {
+	u, err := url.Parse(repoURL)
+	if err != nil {
+		return "<invalid URL>"
+	}
+	return u.Redacted()
 }
